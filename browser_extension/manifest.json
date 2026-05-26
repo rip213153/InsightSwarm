@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "InsightSwarm Collector",
+  "version": "0.1.0",
+  "description": "Manually send the current page summary to a local InsightSwarm collector gateway.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1:*/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send to InsightSwarm"
+  }
+}

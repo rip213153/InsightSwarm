@@ -1,0 +1,17 @@
+{
+  "scenario": "partial_missing_evidence",
+  "question": "DeepSeek 下步战略",
+  "search_results": [
+    {
+      "title": "DeepSeek Commentary",
+      "url": "https://example.com/deepseek-commentary",
+      "snippet": "Analysts discuss possible product moves."
+    }
+  ],
+  "documents": [
+    {
+      "url": "https://example.com/deepseek-commentary",
+      "text": "Analysts speculate that DeepSeek may pursue enterprise growth, but no primary-source confirmation is provided."
+    }
+  ]
+}
