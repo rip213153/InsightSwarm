@@ -7,6 +7,7 @@ from insightswarm.models.qwen import QwenOpenAICompatibleClient
 
 SUPPORTED_PROVIDERS = {
     "fake",
+    "qwen",
     "deepseek",
     "openai_compatible",
     "qwen_text",
@@ -35,7 +36,7 @@ class QwenSwarmClient:
     def __init__(self):
         self.text = QwenOpenAICompatibleClient(
             "qwen_text",
-            __import__("os").getenv("INSIGHTSWARM_QWEN_TEXT_MODEL", "qwen3.6-35b-a3b"),
+            __import__("os").getenv("INSIGHTSWARM_QWEN_TEXT_MODEL", "qwen3.6-flash"),
         )
         self.vision = QwenOpenAICompatibleClient(
             "aliyun_vision",
@@ -57,6 +58,8 @@ def build_model_client(provider: str):
         raise ValueError(
             f"Unsupported model provider '{provider}'. Supported providers: {', '.join(sorted(SUPPORTED_PROVIDERS))}"
         )
+    if provider == "qwen":
+        return QwenSwarmClient()
     if provider == "qwen_text":
         return QwenSwarmClient()
     if provider == "aliyun_vision":

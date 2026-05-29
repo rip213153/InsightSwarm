@@ -6,7 +6,7 @@ from threading import Event
 from typing import Any
 
 from insightswarm.agents.agent_loop import AgentLoopState, run_agent_loop
-from insightswarm.agents.extractor_tools import EXTRACTOR_ROLE, EXTRACTOR_TOOLS, ExtractorToolHandlers, ExtractorToolState
+from insightswarm.agents.critic_tools import CRITIC_ROLE, CRITIC_TOOLS, CriticToolHandlers, CriticToolState
 from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.agents.trace import build_tool_trace_callback
 from insightswarm.schemas.swarm import Task
@@ -14,17 +14,16 @@ from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskSto
 
 
 @dataclass(frozen=True)
-class ExtractorResult:
+class CriticResult:
     claimed_task_id: str
-    created_artifact_ids: list[str] = field(default_factory=list)
-    created_evidence_ids: list[str] = field(default_factory=list)
-    created_message_ids: list[str] = field(default_factory=list)
     created_task_ids: list[str] = field(default_factory=list)
+    created_message_ids: list[str] = field(default_factory=list)
+    created_board_item_ids: list[str] = field(default_factory=list)
     terminal_status: str | None = None
     terminal_reason: str | None = None
 
 
-class Extractor:
+class Critic:
     def __init__(self, task_store: TaskStore, mailbox: Mailbox, artifact_store: ArtifactStore, board_store: BoardStore | None = None):
         self.task_store = task_store
         self.mailbox = mailbox
@@ -37,8 +36,8 @@ class Extractor:
         *,
         model_client: object | None = None,
         trace_path: Path | None = None,
-    ) -> ExtractorResult | None:
-        task = self.task_store.claim_next(run_id, owner_role=EXTRACTOR_ROLE)
+    ) -> CriticResult | None:
+        task = self.task_store.claim_next(run_id, owner_role=CRITIC_ROLE)
         if task is None:
             return None
         return self.run_task(task, model_client=model_client, trace_path=trace_path)
@@ -52,8 +51,8 @@ class Extractor:
         model_client: object | None = None,
         max_iterations: int | None = None,
         trace_path: Path | None = None,
-    ) -> list[ExtractorResult]:
-        results: list[ExtractorResult] = []
+    ) -> list[CriticResult]:
+        results: list[CriticResult] = []
         while not stop_event.is_set():
             result = self.run_once(run_id, model_client=model_client, trace_path=trace_path)
             if result is None:
@@ -72,7 +71,7 @@ class Extractor:
         safety_cap: int = 20,
         on_tool_result: Any | None = None,
     ) -> list[dict[str, Any]]:
-        tool_state = ExtractorToolState()
+        tool_state = CriticToolState()
         loop_state = AgentLoopState()
         trace, _ = self._run_loop(
             task,
@@ -91,8 +90,8 @@ class Extractor:
         model_client: object | None = None,
         safety_cap: int = 20,
         trace_path: Path | None = None,
-    ) -> ExtractorResult:
-        tool_state = ExtractorToolState()
+    ) -> CriticResult:
+        tool_state = CriticToolState()
         loop_state = AgentLoopState()
         self._run_loop(
             task,
@@ -100,18 +99,17 @@ class Extractor:
             tool_state=tool_state,
             loop_state=loop_state,
             safety_cap=safety_cap,
-            on_tool_result=build_tool_trace_callback(trace_path, role=EXTRACTOR_ROLE, task=task),
+            on_tool_result=build_tool_trace_callback(trace_path, role=CRITIC_ROLE, task=task),
         )
         if tool_state.terminal_status == "blocked" or loop_state.terminal_status == "blocked":
             self.task_store.block(task.task_id or "")
         else:
             self.task_store.complete(task.task_id or "")
-        return ExtractorResult(
+        return CriticResult(
             claimed_task_id=task.task_id or "",
-            created_artifact_ids=list(tool_state.created_artifact_ids),
-            created_evidence_ids=list(tool_state.created_evidence_ids),
-            created_message_ids=list(tool_state.created_message_ids),
             created_task_ids=list(tool_state.created_task_ids),
+            created_message_ids=list(tool_state.created_message_ids),
+            created_board_item_ids=list(tool_state.created_board_item_ids),
             terminal_status=tool_state.terminal_status or loop_state.terminal_status,
             terminal_reason=tool_state.terminal_reason or loop_state.terminal_reason,
         )
@@ -121,12 +119,12 @@ class Extractor:
         task: Task,
         *,
         model_client: object | None,
-        tool_state: ExtractorToolState,
+        tool_state: CriticToolState,
         loop_state: AgentLoopState,
         safety_cap: int,
         on_tool_result: Any | None = None,
     ) -> tuple[list[dict[str, Any]], AgentLoopState]:
-        handlers = ExtractorToolHandlers(
+        handlers = CriticToolHandlers(
             task=task,
             task_store=self.task_store,
             mailbox=self.mailbox,
@@ -134,11 +132,11 @@ class Extractor:
             board_store=self.board_store,
             state=tool_state,
         )
-        executor = ToolExecutor(EXTRACTOR_TOOLS, handlers.handlers())
+        executor = ToolExecutor(CRITIC_TOOLS, handlers.handlers())
         return run_agent_loop(
             model_client=model_client,
-            system_prompt=_extractor_prompt(),
-            tool_specs=EXTRACTOR_TOOLS,
+            system_prompt=_critic_prompt(),
+            tool_specs=CRITIC_TOOLS,
             executor=executor,
             initial_user_payload={
                 "assigned_task": {
@@ -146,16 +144,16 @@ class Extractor:
                     "kind": task.kind,
                     "owner_role": task.owner_role,
                     "run_id": task.run_id,
-                    "artifact_id": task.inputs.get("artifact_id"),
+                    "evidence_ids": task.inputs.get("evidence_ids"),
                 },
-                "instruction": "Extract exact quote-backed citations from the raw document. Use tools only.",
+                "instruction": "Review the scoped evidence bundle. Validate first, then pass or request targeted repair.",
             },
             state=loop_state,
             safety_cap=safety_cap,
-            metadata_role="extractor_tool_loop",
+            metadata_role="critic_tool_loop",
             on_tool_result=on_tool_result,
         )
 
 
-def _extractor_prompt() -> str:
-    return (Path(__file__).resolve().parent.parent / "prompts" / "extractor.md").read_text(encoding="utf-8")
+def _critic_prompt() -> str:
+    return (Path(__file__).resolve().parent.parent / "prompts" / "critic.md").read_text(encoding="utf-8")

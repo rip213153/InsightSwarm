@@ -27,8 +27,16 @@ def test_run_ask_partial(monkeypatch, capsys):
     )
 
     payload = json.loads(capsys.readouterr().out)
+    critic_steps = [step for step in payload["steps"] if step["tool_call"]["action"] == "critic"]
+    repair_search_steps = [
+        step
+        for step in payload["steps"]
+        if step["tool_call"]["action"] == "search" and step["tool_call"]["arguments"].get("repair_round")
+    ]
 
     assert rc == 0
     assert payload["result_type"] == "report_partial"
     assert payload["critic"]["verdict"] == "repair"
     assert payload["must_fix"]
+    assert len(critic_steps) >= 2
+    assert repair_search_steps

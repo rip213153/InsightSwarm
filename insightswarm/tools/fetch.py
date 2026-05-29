@@ -1,58 +1,108 @@
 from __future__ import annotations
 
+import html as html_lib
+import json
+import os
+import re
+import time
+import urllib.request
+from pathlib import Path
 from typing import Any
 
-from insightswarm.fetching import fetch_source
 from insightswarm.tools.core import ToolContext, ToolResult
 from insightswarm.tools.safety import validate_public_http_url
 
 
 class FetchUrlTool:
     name = "fetch.url"
-    description = "Fetch public URL content using httpx first and Playwright only as controlled fallback."
-    input_schema = {"required": ["url"], "optional": ["timeout"]}
-    output_schema = {"required": ["source_url", "fetcher", "status", "text", "html", "metadata"]}
-    safety_policy = {"allowed_schemes": ["http", "https"], "blocks_local_network_by_default": True}
-    allowed_callers = ["ExtractorAgent"]
-    side_effect_level = "network_read"
-    network_access = "public_http"
-    blocked_inputs = ["file URLs", "localhost/internal URLs in production mode", "non-http schemes"]
-    example_failures = [
-        {"input": {"url": "file:///C:/secret.txt"}, "output": {"status": "blocked", "error": "URL scheme is not allowed"}}
-    ]
-    examples = [
-        {
-            "tool": "fetch.url",
-            "input": {"url": "https://example.com/pricing"},
-            "output": {"status": "ok", "data": {"fetcher": "httpx", "status": "ok", "text": "ExampleCo pricing..."}},
-        },
-        {
-            "tool": "fetch.url",
-            "input": {"url": "file:///C:/secret.txt"},
-            "output": {"status": "blocked", "error": "URL scheme is not allowed", "diagnostics": {"allowed_schemes": ["http", "https"]}},
-        },
-    ]
 
     def run(self, tool_input: dict[str, Any], context: ToolContext | None = None) -> ToolResult:
         url = str(tool_input.get("url") or "")
         blocked = validate_public_http_url(url, context)
         if blocked:
             return blocked
-        result = fetch_source(url, timeout=float(tool_input.get("timeout") or 20.0))
+
+        payload = _fixture_payload()
+        if tool_input.get("repair_round"):
+            fixture_documents = list(payload.get("repair_documents") or [])
+        else:
+            fixture_documents = list(payload.get("documents") or [])
+        for document in fixture_documents:
+            if document.get("url") == url:
+                raw_html = str(document.get("html") or "")
+                text = str(document.get("text") or "")
+                if raw_html and not text:
+                    text = _clean_html(raw_html)["text"]
+                return ToolResult(
+                    "ok",
+                    data={
+                        "source_url": url,
+                        "fetcher": "fixture",
+                        "status": "ok",
+                        "text": text,
+                        "html": raw_html or f"<html><body>{text}</body></html>",
+                        "title": document.get("title") or _clean_html(raw_html or text)["title"],
+                        "metadata": {"fixture": True},
+                    },
+                    provenance={"tool": self.name, "fetcher": "fixture"},
+                )
+
+        started = time.perf_counter()
+        try:
+            with urllib.request.urlopen(url, timeout=float(tool_input.get("timeout") or 20.0)) as response:
+                raw = response.read()
+                html = raw.decode("utf-8", errors="replace")
+                cleaned = _clean_html(html)
+        except Exception as exc:
+            return ToolResult(
+                "error",
+                error=f"Fetch failed: {exc}",
+                provenance={"tool": self.name, "fetcher": "urllib"},
+            )
+
         return ToolResult(
-            "ok" if result.ok else "error",
+            "ok",
             data={
-                "source_url": result.source_url,
-                "fetcher": result.fetcher,
-                "status": result.status,
-                "text": result.text,
-                "html": result.html,
-                "screenshot_path": getattr(result, "screenshot_path", None),
-                "latency_ms": result.latency_ms,
-                "fallback_reason": result.fallback_reason,
-                "metadata": result.metadata,
+                "source_url": url,
+                "fetcher": "urllib",
+                "status": "ok",
+                "text": cleaned["text"],
+                "html": html,
+                "title": cleaned["title"],
+                "metadata": {"latency_ms": int((time.perf_counter() - started) * 1000)},
             },
-            error=result.error,
-            diagnostics=result.metadata,
-            provenance={"tool": self.name, "fetcher": result.fetcher},
+            provenance={"tool": self.name, "fetcher": "urllib"},
         )
+
+
+def _fixture_payload() -> dict[str, Any]:
+    fixture_name = os.getenv("INSIGHTSWARM_SCRIPTED_FIXTURE")
+    if not fixture_name:
+        return {}
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / f"{fixture_name}.json"
+    if not fixture_path.exists():
+        return {}
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _clean_html(raw_html: str) -> dict[str, str]:
+    html = raw_html or ""
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    title = _collapse_whitespace(_strip_tags(title_match.group(1))) if title_match else ""
+    body = re.sub(
+        r"<(script|style|nav|header|footer|svg)\b[^>]*>.*?</\1>",
+        " ",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    body = re.sub(r"<!--.*?-->", " ", body, flags=re.DOTALL)
+    text = _collapse_whitespace(_strip_tags(body))
+    return {"title": title, "text": text}
+
+
+def _strip_tags(value: str) -> str:
+    return html_lib.unescape(re.sub(r"<[^>]+>", " ", value))
+
+
+def _collapse_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()

@@ -13,5 +13,18 @@
       "url": "https://example.com/deepseek-commentary",
       "text": "Analysts speculate that DeepSeek may pursue enterprise growth, but no primary-source confirmation is provided."
     }
+  ],
+  "repair_search_results": [
+    {
+      "title": "DeepSeek Industry Commentary Follow-up",
+      "url": "https://example.com/deepseek-followup",
+      "snippet": "Further commentary still lacks primary confirmation."
+    }
+  ],
+  "repair_documents": [
+    {
+      "url": "https://example.com/deepseek-followup",
+      "text": "Industry observers continue to speculate about DeepSeek enterprise growth, but they still provide no primary source confirmation."
+    }
   ]
 }

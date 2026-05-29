@@ -3,15 +3,20 @@
   "question": "DeepSeek 下步战略",
   "search_results": [
     {
-      "title": "DeepSeek Strategy Update",
-      "url": "https://example.com/deepseek-strategy",
-      "snippet": "DeepSeek is expanding enterprise adoption and model distribution."
+      "title": "DeepSeek Official Enterprise Update",
+      "url": "https://www.deepseek.com/news/enterprise-expansion",
+      "snippet": "DeepSeek says it will expand enterprise distribution and strengthen model ecosystem partnerships."
     }
+  ],
+  "sub_questions": [
+    "DeepSeek enterprise distribution priorities",
+    "DeepSeek ecosystem partnership direction"
   ],
   "documents": [
     {
-      "url": "https://example.com/deepseek-strategy",
-      "text": "DeepSeek plans to expand enterprise distribution and focus on model ecosystem partnerships in the next stage."
+      "url": "https://www.deepseek.com/news/enterprise-expansion",
+      "title": "DeepSeek Official Enterprise Update",
+      "text": "DeepSeek says it will expand enterprise distribution and strengthen model ecosystem partnerships in the next stage."
     }
   ]
 }

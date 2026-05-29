@@ -12,7 +12,7 @@ from insightswarm.config import load_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ACCEPTANCE_TMP_ROOT = REPO_ROOT / ".tmp" / "acceptance"
-QWEN_TEXT_MODEL = "qwen3.6-flash-2026-04-16"
+QWEN_TEXT_MODEL = "qwen3.6-flash"
 
 
 def require_real_qwen(monkeypatch: pytest.MonkeyPatch) -> None:

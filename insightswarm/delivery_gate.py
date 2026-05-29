@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import json
+from typing import Literal
+
+from insightswarm.db.store import Store
+from insightswarm.swarm_store import Mailbox, TaskStore
+
+
+GateStatus = Literal["open", "closed", "blocked"]
+REPAIR_PRIORITY_THRESHOLD = 8
+
+
+@dataclass(frozen=True)
+class DeliveryGateDecision:
+    status: GateStatus
+    reasons: list[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    critic_verdict: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == "open"
+
+
+def evaluate_delivery_gate(store: Store, run_id: str) -> DeliveryGateDecision:
+    evidence_rows = store.list_swarm_evidence(run_id, qa_state="ready")
+    tasks = store.list_swarm_tasks(run_id)
+    board_items = store.list_swarm_board_items(run_id)
+    pending_repairs = [
+        task
+        for task in tasks
+        if task.kind == "repair_request" and task.status in {"pending", "leased"} and task.priority >= REPAIR_PRIORITY_THRESHOLD
+    ]
+    pending_reviews = [
+        task
+        for task in tasks
+        if task.kind == "evidence_review" and task.status in {"pending", "leased"}
+    ]
+    active_research_tasks = [
+        task
+        for task in tasks
+        if task.owner_role != "writer" and task.status in {"pending", "leased"}
+    ]
+    open_repair_questions = [
+        item
+        for item in board_items
+        if item.kind == "question"
+        and item.status in {"open", "active", "blocked"}
+        and str(item.payload.get("question_type") or "") in {"repair", "source_request"}
+    ]
+    open_conflicts = [
+        item
+        for item in board_items
+        if item.kind == "conflict" and item.status in {"open", "active"}
+    ]
+    authorization_messages = [
+        message
+        for message in store.list_swarm_messages(run_id)
+        if message.type == "observation" and str(message.payload.get("kind") or "") == "authorization_request"
+    ]
+    critic_verdict = _latest_critic_verdict(store, run_id)
+
+    reasons: list[str] = []
+    status: GateStatus = "open"
+    if not evidence_rows:
+        status = "closed"
+        reasons.append("citation-backed evidence is missing")
+    if pending_reviews or (evidence_rows and critic_verdict is None):
+        status = "closed"
+        reasons.append("critic review is pending")
+    if pending_repairs:
+        status = "closed"
+        reasons.append("high-priority repair_request is unresolved")
+    if active_research_tasks:
+        status = "closed"
+        reasons.append("research tasks are still running")
+    if open_repair_questions:
+        status = "closed"
+        reasons.append("repair/source questions are still open")
+    if open_conflicts:
+        status = "closed"
+        reasons.append("board conflicts are still open")
+    if authorization_messages:
+        status = "blocked"
+        reasons.append("authorization_request is pending")
+    if critic_verdict == "block":
+        status = "blocked"
+        reasons.append("latest critic verdict is block")
+
+    return DeliveryGateDecision(
+        status=status,
+        reasons=reasons,
+        evidence_ids=[row.evidence_id for row in evidence_rows],
+        critic_verdict=critic_verdict,
+    )
+
+
+def synchronize_delivery_gate(store: Store, run_id: str) -> DeliveryGateDecision:
+    decision = evaluate_delivery_gate(store, run_id)
+    store.update_swarm_run_state(
+        run_id,
+        phase="delivery" if decision.is_open else None,
+        delivery_gate=decision.is_open,
+    )
+    if decision.is_open:
+        _ensure_delivery_request(store, run_id, decision)
+    return decision
+
+
+def _ensure_delivery_request(store: Store, run_id: str, decision: DeliveryGateDecision) -> None:
+    existing = [
+        task
+        for task in store.list_swarm_tasks(run_id)
+        if task.owner_role == "writer" and task.kind == "delivery_request" and task.status in {"pending", "leased", "done"}
+    ]
+    if existing:
+        return
+    run_state = store.get_swarm_run_state(run_id)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    delivery_task = task_store.create(
+        run_id,
+        kind="delivery_request",
+        status="pending",
+        owner_role="writer",
+        inputs={
+            "question": run_state.objective,
+            "evidence_ids": list(decision.evidence_ids),
+            "report_kind": _report_kind_for_decision(store, run_id, decision),
+        },
+        priority=10,
+        created_by="delivery_gate",
+    )
+    mailbox.send(
+        run_id,
+        from_role="delivery_gate",
+        to_role="writer",
+        message_type="request",
+        payload={
+            "kind": "delivery_request",
+            "task_id": delivery_task.task_id,
+            "evidence_ids": list(decision.evidence_ids),
+            "report_kind": delivery_task.inputs.get("report_kind"),
+        },
+        related_task_id=delivery_task.task_id,
+    )
+
+
+def _latest_critic_verdict(store: Store, run_id: str) -> str | None:
+    payload = store.conn.execute(
+        """
+        SELECT payload_json
+        FROM swarm_messages
+        WHERE run_id = ? AND from_role = 'critic'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+    if payload is None:
+        return None
+
+    return str(json.loads(payload["payload_json"]).get("verdict") or "")
+
+
+def _report_kind_for_decision(store: Store, run_id: str, decision: DeliveryGateDecision) -> str:
+    has_delivery_gap = any(
+        message.type == "observation" and str(message.payload.get("kind") or "") == "delivery_gap"
+        for message in store.list_swarm_messages(run_id)
+    )
+    if has_delivery_gap or decision.critic_verdict != "pass":
+        return "report_partial"
+    return "report"

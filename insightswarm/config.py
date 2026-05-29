@@ -12,7 +12,7 @@ class Settings:
     model_provider: str = "fake"
     config_path: Path | None = None
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    qwen_text_model: str = "qwen3.6-35b-a3b"
+    qwen_text_model: str = "qwen3.6-flash"
     qwen_omni_model: str = "qwen3.5-omni-plus-2026-03-15"
 
 
@@ -95,7 +95,7 @@ def load_settings(
         dotenv.get("INSIGHTSWARM_QWEN_TEXT_MODEL"),
         os.getenv("INSIGHTSWARM_QWEN_TEXT_MODEL"),
         yaml_config.get("qwen_text_model"),
-        "qwen3.6-35b-a3b",
+        "qwen3.6-flash",
     )
     qwen_omni_model = _first(
         dotenv.get("INSIGHTSWARM_QWEN_OMNI_MODEL"),
@@ -109,6 +109,6 @@ def load_settings(
         provider or "fake",
         yaml_path,
         qwen_base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        qwen_text_model or "qwen3.6-35b-a3b",
+        qwen_text_model or "qwen3.6-flash",
         qwen_omni_model or "qwen3.5-omni-plus-2026-03-15",
     )
