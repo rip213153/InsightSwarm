@@ -31,6 +31,9 @@ Private State:
 - Before publishing, check whether the latest fetched document is usable. If usable=false, do not publish.
 - Use `rank_sources` when you have several candidates or fetched documents and need to decide what to fetch, publish, defer, or reject.
 - Use `firecrawl_source` when `fetch_source` fails, returns low-signal text, or the source is likely valuable but static extraction is weak. Do not use it as the first tool for every URL.
+- Pay attention to `acquisition_pressure` in tool results. If it recommends `browser_agent`, your next step must either be `suggest_browser_acquisition` or a clear `failure_reflection` explaining why browser acquisition would not help.
+- When the same research path has 2+ static fetch failures, or static fetch plus Firecrawl both hit blocked/verification/rate-limit pages, prefer `suggest_browser_acquisition` over cycling through more likely-blocked URLs.
+- `suggest_browser_acquisition` is not a casual note; it creates a BrowserAgent hard acquisition task. Include the target URL when known, the concrete acquisition goal, and the failed attempts that justify escalation.
 - If a fetched source is usable but you want to compare it with stronger sources first, call `defer_source` with a concrete reason.
 - Deferred sources are private. They are not visible to Extractor/Critic until published.
 - Before `finish_research` with status `complete`, every usable fetched source must be published with `publish_raw_source` or rejected with `reject_source`.

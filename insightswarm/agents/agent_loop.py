@@ -12,6 +12,7 @@ class AgentLoopState:
     private_state: dict[str, Any] = field(default_factory=dict)
     event_memory: dict[str, Any] = field(default_factory=lambda: {"events": [], "key_decisions": [], "abandoned_paths": []})
     messages: list[dict[str, Any]] = field(default_factory=list)
+    model_failure_count: int = 0
     terminal_status: str | None = None
     terminal_reason: str | None = None
 
@@ -45,22 +46,43 @@ def run_agent_loop(
         loop_state.private_state = _next_private_state(turn)
 
         if tool_call is None:
-            loop_state.terminal_status = _safe_text(turn.get("stop_reason")) or "done"
-            loop_state.terminal_reason = _safe_text(turn.get("assistant_text")) or "model stopped without a tool call"
+            failure_status = _safe_text(turn.get("stop_reason")) or "model_no_tool"
+            failure_reason = _safe_text(turn.get("assistant_text")) or "model stopped without a tool call"
+            loop_state.model_failure_count += 1
+            tool_result = {
+                "ok": False,
+                "tool_name": failure_status,
+                "error": failure_reason,
+                "terminal": False,
+                "failure_kind": _failure_kind(failure_status, failure_reason),
+                "required_next_step": "Return a valid tool_call. Use an explicit finish_* tool only when the task is truly complete.",
+                "model_failure_count": loop_state.model_failure_count,
+            }
+            loop_state.messages.append({"role": "assistant", "content": _compact_json(turn, limit=3000)})
+            loop_state.messages.append({"role": "tool", "content": _compact_json(tool_result, limit=2000)})
+            _append_event(loop_state, round_number, {"name": failure_status, "input": {}}, tool_result)
+            if on_tool_result:
+                on_tool_result(round_number, {"name": failure_status, "input": {}}, tool_result, loop_state)
             trace.append(
                 {
                     "round": round_number,
                     "assistant_text": turn.get("assistant_text"),
                     "tool_call": None,
-                    "tool_result": None,
-                    "stop_reason": loop_state.terminal_status,
+                    "tool_result": tool_result,
+                    "stop_reason": None,
+                    "failure_kind": tool_result["failure_kind"],
                     "private_state": dict(loop_state.private_state),
                     "minimal_event_memory": dict(loop_state.event_memory),
                 }
             )
+            if _recoverable_model_failure(failure_status) and loop_state.model_failure_count < 3:
+                continue
+            loop_state.terminal_status = failure_status
+            loop_state.terminal_reason = failure_reason
             break
 
         execution = executor.execute(tool_call)
+        loop_state.model_failure_count = 0
         tool_result = execution.to_message()
         _append_event(loop_state, round_number, tool_call, tool_result)
         loop_state.messages.append({"role": "assistant", "content": _compact_json(turn, limit=3000)})
@@ -140,6 +162,24 @@ def _call_model(
         return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         return {"assistant_text": text[:1000], "tool_call": None, "stop_reason": "invalid_json"}
+
+
+def _failure_kind(status: str, reason: str) -> str:
+    lowered_status = _safe_text(status).lower()
+    lowered_reason = _safe_text(reason).lower()
+    if lowered_status == "model_error" and ("timed out" in lowered_reason or "timeout" in lowered_reason):
+        return "model_timeout"
+    if lowered_status in {"model_error", "invalid_json"}:
+        return lowered_status
+    if lowered_status == "model_no_tool":
+        return "model_no_tool"
+    if lowered_status == "blocked" and "safety cap" in lowered_reason:
+        return "safety_cap"
+    return lowered_status or "unknown"
+
+
+def _recoverable_model_failure(status: str) -> bool:
+    return _safe_text(status).lower() in {"model_error", "invalid_json", "model_no_tool"}
 
 
 def _parse_tool_call(turn: dict[str, Any], tool_specs: list[dict[str, Any]]) -> dict[str, Any] | None:

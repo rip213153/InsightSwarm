@@ -45,7 +45,11 @@ def _summarize_tool_result(tool_result: dict[str, Any]) -> dict[str, Any]:
         "repair_task_id",
         "message_id",
         "review_task_id",
+        "failure_review_task_id",
         "unresolved_publishable_count",
+        "failure_kind",
+        "required_next_step",
+        "model_failure_count",
     )
     summary = {key: tool_result.get(key) for key in keys if key in tool_result}
     if isinstance(tool_result.get("document"), dict):

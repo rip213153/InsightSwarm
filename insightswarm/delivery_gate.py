@@ -4,12 +4,20 @@ from dataclasses import dataclass, field
 import json
 from typing import Literal
 
+from insightswarm.authorization_flow import pending_authorization_requests
 from insightswarm.db.store import Store
-from insightswarm.swarm_store import Mailbox, TaskStore
+from insightswarm.swarm_store import BoardStore, Mailbox, TaskStore
 
 
 GateStatus = Literal["open", "closed", "blocked"]
 REPAIR_PRIORITY_THRESHOLD = 8
+MATERIAL_RESEARCH_ROLES = {"researcher", "extractor", "browser_agent"}
+MATERIAL_RESEARCH_KINDS = {
+    "research_subquestion",
+    "research_repair",
+    "raw_document",
+    "hard_acquisition",
+}
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,7 @@ class DeliveryGateDecision:
 
 
 def evaluate_delivery_gate(store: Store, run_id: str) -> DeliveryGateDecision:
+    _reconcile_passed_conflicts(store, run_id)
     evidence_rows = store.list_swarm_evidence(run_id, qa_state="ready")
     tasks = store.list_swarm_tasks(run_id)
     board_items = store.list_swarm_board_items(run_id)
@@ -36,12 +45,14 @@ def evaluate_delivery_gate(store: Store, run_id: str) -> DeliveryGateDecision:
     pending_reviews = [
         task
         for task in tasks
-        if task.kind == "evidence_review" and task.status in {"pending", "leased"}
+        if task.kind in {"evidence_review", "extraction_failure_review"} and task.status in {"pending", "leased"}
     ]
     active_research_tasks = [
         task
         for task in tasks
-        if task.owner_role != "writer" and task.status in {"pending", "leased"}
+        if task.owner_role in MATERIAL_RESEARCH_ROLES
+        and task.kind in MATERIAL_RESEARCH_KINDS
+        and task.status in {"pending", "leased"}
     ]
     open_repair_questions = [
         item
@@ -55,19 +66,20 @@ def evaluate_delivery_gate(store: Store, run_id: str) -> DeliveryGateDecision:
         for item in board_items
         if item.kind == "conflict" and item.status in {"open", "active"}
     ]
-    authorization_messages = [
-        message
-        for message in store.list_swarm_messages(run_id)
-        if message.type == "observation" and str(message.payload.get("kind") or "") == "authorization_request"
-    ]
+    authorization_messages = pending_authorization_requests(store, run_id)
+    critic_pass = _latest_critic_pass(store, run_id)
     critic_verdict = _latest_critic_verdict(store, run_id)
+    pending_reviews_block_delivery = bool(pending_reviews) and not (
+        critic_pass is not None and not active_research_tasks and not pending_repairs
+    )
+    delivery_evidence_ids = _accepted_frontier_evidence_ids(evidence_rows, critic_pass)
 
     reasons: list[str] = []
     status: GateStatus = "open"
     if not evidence_rows:
         status = "closed"
         reasons.append("citation-backed evidence is missing")
-    if pending_reviews or (evidence_rows and critic_verdict is None):
+    if pending_reviews_block_delivery or (evidence_rows and critic_verdict is None):
         status = "closed"
         reasons.append("critic review is pending")
     if pending_repairs:
@@ -92,7 +104,7 @@ def evaluate_delivery_gate(store: Store, run_id: str) -> DeliveryGateDecision:
     return DeliveryGateDecision(
         status=status,
         reasons=reasons,
-        evidence_ids=[row.evidence_id for row in evidence_rows],
+        evidence_ids=delivery_evidence_ids,
         critic_verdict=critic_verdict,
     )
 
@@ -148,6 +160,27 @@ def _ensure_delivery_request(store: Store, run_id: str, decision: DeliveryGateDe
     )
 
 
+def _reconcile_passed_conflicts(store: Store, run_id: str) -> None:
+    board_store = BoardStore(store)
+    for message in store.list_swarm_messages(run_id):
+        if message.from_role != "critic":
+            continue
+        payload = dict(message.payload or {})
+        if payload.get("verdict") != "pass" and payload.get("kind") != "pass":
+            continue
+        evidence_ids = [str(value) for value in list(payload.get("evidence_ids") or []) if str(value)]
+        issue_keys = [str(payload.get("issue_key") or "").strip()]
+        issue_keys.extend(board_store.issue_keys_for_evidence(run_id, evidence_ids))
+        board_store.resolve_conflicts(
+            run_id,
+            issue_keys=[key for key in issue_keys if key],
+            evidence_ids=evidence_ids,
+            resolved_by="critic",
+            reason=str(payload.get("reason") or "Critic pass reconciled stale conflict state."),
+            resolution_event_at=message.created_at,
+        )
+
+
 def _latest_critic_verdict(store: Store, run_id: str) -> str | None:
     payload = store.conn.execute(
         """
@@ -163,6 +196,30 @@ def _latest_critic_verdict(store: Store, run_id: str) -> str | None:
         return None
 
     return str(json.loads(payload["payload_json"]).get("verdict") or "")
+
+
+def _latest_critic_pass(store: Store, run_id: str) -> dict[str, object] | None:
+    for message in reversed(store.list_swarm_messages(run_id)):
+        if message.from_role != "critic":
+            continue
+        payload = dict(message.payload or {})
+        verdict = str(payload.get("verdict") or payload.get("kind") or "")
+        if verdict == "pass":
+            return {
+                "created_at": message.created_at,
+                "evidence_ids": [str(value) for value in list(payload.get("evidence_ids") or []) if str(value)],
+            }
+    return None
+
+
+def _accepted_frontier_evidence_ids(evidence_rows: list[object], critic_pass: dict[str, object] | None) -> list[str]:
+    ready_ids = [str(getattr(row, "evidence_id", "") or "") for row in evidence_rows]
+    ready_id_set = set(ready_ids)
+    if not critic_pass:
+        return ready_ids
+    passed_ids = [str(value) for value in list(critic_pass.get("evidence_ids") or []) if str(value)]
+    frontier_ids = [evidence_id for evidence_id in passed_ids if evidence_id in ready_id_set]
+    return frontier_ids or ready_ids
 
 
 def _report_kind_for_decision(store: Store, run_id: str, decision: DeliveryGateDecision) -> str:

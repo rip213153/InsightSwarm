@@ -15,8 +15,10 @@ Tool use:
 - Treat `read_compressed_raw_view` as navigation help only. Citation quotes must still be exact substrings of the full raw document and will be backchecked by `propose_citations`.
 - Call `propose_citations` only after reading the document and selecting exact quotes.
 - Use `request_better_source` when no quote-backed citation can be extracted but the research question still matters.
+- Use `request_browser_acquisition` when the raw document is low-signal because the source appears dynamic, visual, modal-gated, SPA-like, or requires scroll/click observation. This creates a BrowserAgent hard_acquisition task; it is not browsing by yourself.
 - Use `reject_document` when the document is blocked, irrelevant, or boilerplate.
-- End with `finish_extraction` after citations are written, repair is requested, or the document is rejected.
+- If browser acquisition or repair is requested, finish the extraction path after the request is written.
+- End with `finish_extraction` after citations were written, browser acquisition was requested, repair was requested, or the document was rejected.
 - Return exactly one `tool_call` per round.
 
 Private State:

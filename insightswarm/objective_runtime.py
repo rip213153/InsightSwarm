@@ -16,6 +16,8 @@ from insightswarm.agents.researcher import Researcher
 from insightswarm.agents.writer import WriterWorker
 from insightswarm.db.store import Store
 from insightswarm.delivery_gate import synchronize_delivery_gate
+from insightswarm.extraction_batches import synchronize_extraction_batches, synchronize_run_evidence_review
+from insightswarm.models.qwen import QwenOpenAICompatibleClient
 from insightswarm.models.router import build_model_client
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
 from insightswarm.util import new_id
@@ -34,8 +36,9 @@ DeliveryKind = Literal["report", "report_partial", "report_blocked"]
 @dataclass(frozen=True)
 class ObjectiveBudget:
     max_steps: int = 12
-    max_no_progress_seconds: float = 5.0
-    max_runtime_seconds: float = 60.0
+    max_no_progress_seconds: float = 120.0
+    max_runtime_seconds: float = 1800.0
+    max_drain_seconds: float = 900.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,6 +56,7 @@ class DeliveryResult:
     report: dict[str, Any] | None = None
     critic: dict[str, Any] | None = None
     must_fix: list[str] = field(default_factory=list)
+    technical_failures: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -74,6 +78,7 @@ class RuntimeState:
     stop_reason: StopReason | None = None
     last_progress_at: float = 0.0
     model_client: Any | None = None
+    browser_model_client: Any | None = None
 
 
 def run_objective(
@@ -83,6 +88,7 @@ def run_objective(
     run_root: Path,
     model_client: Any | None = None,
     run_id: str | None = None,
+    browser_model_client: Any | None = None,
 ) -> DeliveryResult:
     run_id = run_id or new_id("run")
     run_dir = run_root / ".tmp" / f"run-{run_id}"
@@ -99,12 +105,14 @@ def run_objective(
         board_store=BoardStore(store),
         last_progress_at=time.monotonic(),
         model_client=model_client,
+        browser_model_client=browser_model_client or _build_browser_model_client(),
     )
+    state.task_store.recover_expired_leases(run_id)
 
     stop_event = threading.Event()
     worker_threads = _start_worker_threads(store, state, stop_event)
     try:
-        _govern_until_stop(store, state, stop_event)
+        _wait_until_stop(store, state, stop_event)
     finally:
         stop_event.set()
         for thread in worker_threads:
@@ -122,8 +130,9 @@ def create_and_run_objective(
     model_provider: str,
     artifact_dir: Path,
     max_steps: int = 12,
-    max_runtime_seconds: float = 60.0,
-    max_no_progress_seconds: float = 5.0,
+    max_runtime_seconds: float = 1800.0,
+    max_no_progress_seconds: float = 120.0,
+    max_drain_seconds: float = 900.0,
     quality_mode: str = "production",
     search_provider: str = "tavily",
     browser_backend: str | None = None,
@@ -131,6 +140,10 @@ def create_and_run_objective(
     **_: Any,
 ) -> DeliveryResult:
     fixture = _fixture_payload()
+    if browser_backend:
+        os.environ["INSIGHTSWARM_BROWSER_BACKEND"] = browser_backend
+    if browser_cdp_url:
+        os.environ["INSIGHTSWARM_BROWSER_CDP_URL"] = browser_cdp_url
     metadata = {
         "query": query,
         "model_provider": model_provider,
@@ -157,6 +170,7 @@ def create_and_run_objective(
         browser_goal=fixture.get("browser_goal"),
     )
     model_client = build_model_client(model_provider if model_provider in {"qwen", "qwen_text", "fake"} else "qwen")
+    browser_model_client = _build_browser_model_client()
     return run_objective(
         store,
         query,
@@ -164,10 +178,12 @@ def create_and_run_objective(
             max_steps=max_steps,
             max_runtime_seconds=max_runtime_seconds,
             max_no_progress_seconds=max_no_progress_seconds,
+            max_drain_seconds=max_drain_seconds,
         ),
         artifact_dir.parent,
         model_client=model_client,
         run_id=run_id,
+        browser_model_client=browser_model_client,
     )
 
 
@@ -189,6 +205,8 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
                 state.run_id,
                 stop_event,
                 poll_interval=0.05,
+                model_client=state.browser_model_client or state.model_client,
+                trace_path=state.step_trace_path,
             ),
             daemon=True,
         ),
@@ -237,10 +255,21 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
     return threads
 
 
-def _govern_until_stop(store: Store, state: RuntimeState, stop_event: threading.Event) -> None:
+def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Event) -> None:
     start = time.monotonic()
+    drain_started_at: float | None = None
     last_counts = _progress_counts(store, state.run_id)
     while not stop_event.is_set():
+        assert state.task_store is not None
+        recovered = state.task_store.recover_expired_leases(state.run_id)
+        if recovered:
+            _write_runtime_trace(state, "lease_recovered", {"count": recovered})
+        updated_batches = synchronize_extraction_batches(store, state.run_id)
+        if updated_batches:
+            _write_runtime_trace(state, "extraction_batches_ready", {"count": updated_batches})
+        created_reviews = synchronize_run_evidence_review(store, state.run_id)
+        if created_reviews:
+            _write_runtime_trace(state, "run_reviews_created", {"count": created_reviews})
         decision = synchronize_delivery_gate(store, state.run_id)
         state.delivery_gate_status = decision.status
         state.delivery_gate_reasons = list(decision.reasons)
@@ -253,16 +282,30 @@ def _govern_until_stop(store: Store, state: RuntimeState, stop_event: threading.
         report = _load_report_from_store(store, state.run_id)
         if report is not None:
             state.stop_reason = "deliver_called"
+            _write_runtime_trace(state, "stop", {"stop_reason": state.stop_reason})
             stop_event.set()
             continue
 
         if decision.status == "blocked":
             state.stop_reason = "human_required"
+            _write_runtime_trace(state, "stop", {"stop_reason": state.stop_reason, "delivery_gate_reasons": state.delivery_gate_reasons})
             stop_event.set()
             continue
 
         if time.monotonic() - start >= state.budget.max_runtime_seconds:
+            if _has_active_work(store, state.run_id):
+                if drain_started_at is None:
+                    drain_started_at = time.monotonic()
+                    _write_runtime_trace(
+                        state,
+                        "drain_started",
+                        {"active_task_count": len(_active_tasks(store, state.run_id))},
+                    )
+                if time.monotonic() - drain_started_at < state.budget.max_drain_seconds:
+                    time.sleep(0.05)
+                    continue
             state.stop_reason = "budget_exhausted"
+            _write_runtime_trace(state, "stop", {"stop_reason": state.stop_reason, "delivery_gate_reasons": state.delivery_gate_reasons})
             stop_event.set()
             continue
 
@@ -271,6 +314,7 @@ def _govern_until_stop(store: Store, state: RuntimeState, stop_event: threading.
             and time.monotonic() - state.last_progress_at >= state.budget.max_no_progress_seconds
         ):
             state.stop_reason = "no_progress_budget_exhausted"
+            _write_runtime_trace(state, "stop", {"stop_reason": state.stop_reason, "delivery_gate_reasons": state.delivery_gate_reasons})
             stop_event.set()
             continue
 
@@ -287,10 +331,30 @@ def _progress_counts(store: Store, run_id: str) -> tuple[int, int, int, int]:
 
 
 def _has_active_work(store: Store, run_id: str) -> bool:
-    return any(
-        task.status in {"pending", "leased"}
+    return bool(_active_tasks(store, run_id))
+
+
+def _active_tasks(store: Store, run_id: str) -> list[Any]:
+    return [
+        task
         for task in store.list_swarm_tasks(run_id)
-    )
+        if task.status in {"pending", "leased"}
+    ]
+
+
+def _write_runtime_trace(state: RuntimeState, event: str, payload: dict[str, Any]) -> None:
+    if state.step_trace_path is None:
+        return
+    state.step_trace_path.parent.mkdir(parents=True, exist_ok=True)
+    with state.step_trace_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {"kind": "runtime_event", "event": event, "run_id": state.run_id, "payload": payload},
+                ensure_ascii=False,
+                default=str,
+            )
+            + "\n"
+        )
 
 
 def _build_delivery_result(store: Store, state: RuntimeState, stop_reason: StopReason) -> DeliveryResult:
@@ -341,6 +405,7 @@ def _build_delivery_result(store: Store, state: RuntimeState, stop_reason: StopR
         report=report,
         critic=critic,
         must_fix=must_fix,
+        technical_failures=_technical_failures(store, state.run_id),
     )
 
 
@@ -378,6 +443,37 @@ def _default_critic_summary(store: Store, run_id: str) -> dict[str, Any]:
         "must_fix": ["citation-backed evidence is missing"],
         "targeted_query": store.get_swarm_run_state(run_id).objective,
     }
+
+
+def _technical_failures(store: Store, run_id: str) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for message in store.list_swarm_messages(run_id):
+        if message.type != "observation":
+            continue
+        payload = dict(message.payload or {})
+        if payload.get("kind") == "technical_failure":
+            failures.append(
+                {
+                    "role": payload.get("role") or message.from_role,
+                    "task_id": payload.get("task_id") or message.related_task_id,
+                    "task_kind": payload.get("task_kind"),
+                    "status": payload.get("status"),
+                    "reason": payload.get("reason"),
+                    "retryable": payload.get("retryable"),
+                }
+            )
+        elif payload.get("kind") == "extraction_failure" and payload.get("failure_category") == "technical":
+            failures.append(
+                {
+                    "role": message.from_role,
+                    "task_id": message.related_task_id,
+                    "task_kind": None,
+                    "status": "technical_failure",
+                    "reason": payload.get("reason"),
+                    "retryable": payload.get("retryable"),
+                }
+            )
+    return failures[-20:]
 
 
 def _assemble_result_steps(store: Store, state: RuntimeState, critic: dict[str, Any]) -> list[dict[str, Any]]:
@@ -426,7 +522,7 @@ def _assemble_result_steps(store: Store, state: RuntimeState, critic: dict[str, 
         )
     steps.append(
         {
-            "tool_call": {"action": "governance", "arguments": {}},
+            "tool_call": {"action": "phase_controller", "arguments": {}},
             "result": {
                 "delivery_gate_status": state.delivery_gate_status,
                 "delivery_gate_reasons": list(state.delivery_gate_reasons),
@@ -446,3 +542,11 @@ def _fixture_payload() -> dict[str, Any]:
     if not fixture_path.exists():
         return {}
     return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _build_browser_model_client() -> Any | None:
+    model_name = os.getenv("INSIGHTSWARM_BROWSER_QWEN_TEXT_MODEL") or os.getenv("INSIGHTSWARM_BROWSER_MODEL_NAME") or os.getenv("INSIGHTSWARM_QWEN_TEXT_MODEL") or "qwen3.6-plus"
+    try:
+        return QwenOpenAICompatibleClient("qwen_text", model_name)
+    except Exception:
+        return None

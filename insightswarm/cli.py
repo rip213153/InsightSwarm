@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from insightswarm.agents.browser_agent import HumanAuthorizationRequired
+from insightswarm.authorization_flow import pending_authorization_requests, write_authorization_decision
 from insightswarm.config import load_settings
 from insightswarm.db.migrations import init_db
 from insightswarm.db.store import Store
-from insightswarm.objective_runtime import create_and_run_objective
+from insightswarm.models.router import build_model_client
+from insightswarm.objective_runtime import ObjectiveBudget, create_and_run_objective, run_objective
 from insightswarm.util import new_id
 
 
@@ -28,8 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_ask.add_argument("--query", default=None)
     run_ask.add_argument("--name", default="objective-intelligence")
     run_ask.add_argument("--max-steps", type=int, default=12)
-    run_ask.add_argument("--max-runtime-seconds", type=float, default=300.0)
-    run_ask.add_argument("--max-no-progress-seconds", type=float, default=30.0)
+    run_ask.add_argument("--max-runtime-seconds", type=float, default=1800.0)
+    run_ask.add_argument("--max-no-progress-seconds", type=float, default=120.0)
+    run_ask.add_argument("--max-drain-seconds", type=float, default=900.0)
     run_ask.add_argument("--quality-mode", default="production", choices=["production", "test"])
     run_ask.add_argument("--search-provider", default="tavily")
     run_ask.add_argument("--browser-backend", default=None)
@@ -68,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_steps=args.max_steps,
                 max_runtime_seconds=args.max_runtime_seconds,
                 max_no_progress_seconds=args.max_no_progress_seconds,
+                max_drain_seconds=args.max_drain_seconds,
                 allow_delivery=True,
                 quality_mode=args.quality_mode,
                 search_provider=args.search_provider,
@@ -80,6 +85,18 @@ def main(argv: list[str] | None = None) -> int:
         payload = result.to_dict()
         if payload["stop_reason"] == "human_required":
             print("HumanAuthorizationRequired", file=__import__("sys").stderr)
+            if not args.json:
+                result = _authorize_and_resume_if_allowed(
+                    store,
+                    result=result,
+                    model_provider=settings.model_provider,
+                    artifact_dir=settings.artifact_dir,
+                    max_steps=args.max_steps,
+                    max_runtime_seconds=args.max_runtime_seconds,
+                    max_no_progress_seconds=args.max_no_progress_seconds,
+                    max_drain_seconds=args.max_drain_seconds,
+                )
+                payload = result.to_dict()
         if args.json:
             print(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
         else:
@@ -106,6 +123,65 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     raise AssertionError("unreachable")
+
+
+def _authorize_and_resume_if_allowed(
+    store: Store,
+    *,
+    result: object,
+    model_provider: str,
+    artifact_dir: Path,
+    max_steps: int,
+    max_runtime_seconds: float,
+    max_no_progress_seconds: float,
+    max_drain_seconds: float,
+) -> object:
+    current = result
+    while True:
+        payload = current.to_dict()
+        if payload.get("stop_reason") != "human_required":
+            return current
+        pending = pending_authorization_requests(store, payload["run_id"])
+        if not pending:
+            return current
+        request = pending[-1]
+        print("", file=sys.stderr)
+        print("Browser authorization requested:", file=sys.stderr)
+        print(f"  task_id: {request.task_id}", file=sys.stderr)
+        print(f"  goal: {request.goal}", file=sys.stderr)
+        print(f"  reason: {request.reason}", file=sys.stderr)
+        answer = input("Allow this specific browser action and resume this run? [y/N] ").strip().lower()
+        if answer not in {"y", "yes"}:
+            write_authorization_decision(
+                store,
+                payload["run_id"],
+                task_id=request.task_id,
+                decision="deny",
+                reason="operator denied browser authorization",
+            )
+            return current
+
+        write_authorization_decision(
+            store,
+            payload["run_id"],
+            task_id=request.task_id,
+            decision="allow",
+            reason="operator allowed this specific browser action in the active CLI session",
+        )
+        provider = model_provider if model_provider in {"qwen", "qwen_text", "fake"} else "qwen"
+        current = run_objective(
+            store,
+            payload["question"],
+            ObjectiveBudget(
+                max_steps=max_steps,
+                max_runtime_seconds=max_runtime_seconds,
+                max_no_progress_seconds=max_no_progress_seconds,
+                max_drain_seconds=max_drain_seconds,
+            ),
+            artifact_dir.parent,
+            model_client=build_model_client(provider),
+            run_id=payload["run_id"],
+        )
 
 
 if __name__ == "__main__":

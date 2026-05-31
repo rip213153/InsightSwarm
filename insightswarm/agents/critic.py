@@ -6,6 +6,7 @@ from threading import Event
 from typing import Any
 
 from insightswarm.agents.agent_loop import AgentLoopState, run_agent_loop
+from insightswarm.agents.agent_failure_reporting import record_agent_technical_failure
 from insightswarm.agents.critic_tools import CRITIC_ROLE, CRITIC_TOOLS, CriticToolHandlers, CriticToolState
 from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.agents.trace import build_tool_trace_callback
@@ -101,7 +102,17 @@ class Critic:
             safety_cap=safety_cap,
             on_tool_result=build_tool_trace_callback(trace_path, role=CRITIC_ROLE, task=task),
         )
-        if tool_state.terminal_status == "blocked" or loop_state.terminal_status == "blocked":
+        terminal_status = tool_state.terminal_status or loop_state.terminal_status
+        if terminal_status and terminal_status != "done":
+            message_id = record_agent_technical_failure(
+                mailbox=self.mailbox,
+                role=CRITIC_ROLE,
+                task=task,
+                status=terminal_status,
+                reason=tool_state.terminal_reason or loop_state.terminal_reason,
+            )
+            if message_id:
+                tool_state.created_message_ids.append(message_id)
             self.task_store.block(task.task_id or "")
         else:
             self.task_store.complete(task.task_id or "")
@@ -110,7 +121,7 @@ class Critic:
             created_task_ids=list(tool_state.created_task_ids),
             created_message_ids=list(tool_state.created_message_ids),
             created_board_item_ids=list(tool_state.created_board_item_ids),
-            terminal_status=tool_state.terminal_status or loop_state.terminal_status,
+            terminal_status=terminal_status,
             terminal_reason=tool_state.terminal_reason or loop_state.terminal_reason,
         )
 
@@ -145,6 +156,7 @@ class Critic:
                     "owner_role": task.owner_role,
                     "run_id": task.run_id,
                     "evidence_ids": task.inputs.get("evidence_ids"),
+                    "evidence_count": len(list(task.inputs.get("evidence_ids") or [])),
                 },
                 "instruction": "Review the scoped evidence bundle. Validate first, then pass or request targeted repair.",
             },

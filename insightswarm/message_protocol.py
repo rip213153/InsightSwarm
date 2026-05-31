@@ -17,8 +17,10 @@ PAYLOAD_KINDS: dict[str, set[str]] = {
         "research_repair",
         "extract_evidence",
         "review_evidence",
+        "review_extraction_failure",
         "delivery_request",
         "hard_acquisition",
+        "source_replacement_request",
         "repair_request",
     },
     "response": {
@@ -41,6 +43,9 @@ PAYLOAD_KINDS: dict[str, set[str]] = {
         "repair_exhausted",
         "source_quality",
         "source_fetch_error",
+        "browser_trace",
+        "technical_failure",
+        "authorization_decision",
     },
     "suggestion": {
         "try_browser",

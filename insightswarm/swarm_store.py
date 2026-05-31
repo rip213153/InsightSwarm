@@ -70,7 +70,7 @@ class TaskStore:
         run_id: str,
         *,
         owner_role: str,
-        lease_seconds: int = 300,
+        lease_seconds: int = 900,
     ) -> Task | None:
         lease_until = _utc_now_plus(lease_seconds)
         with self.store.transaction() as conn:
@@ -100,7 +100,20 @@ class TaskStore:
                     return self.store.get_swarm_task(task.task_id)
         return None
 
-    def heartbeat(self, task_id: str, *, lease_seconds: int = 300) -> Task:
+    def recover_expired_leases(self, run_id: str) -> int:
+        now = _utc_now()
+        with self.store.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE swarm_tasks
+                SET status = 'pending', lease_until = NULL, updated_at = ?
+                WHERE run_id = ? AND status = 'leased' AND lease_until IS NOT NULL AND lease_until < ?
+                """,
+                (now, run_id, now),
+            )
+            return int(cursor.rowcount or 0)
+
+    def heartbeat(self, task_id: str, *, lease_seconds: int = 900) -> Task:
         lease_until = _utc_now_plus(lease_seconds)
         return self.update_status(task_id, status="leased", lease_until=lease_until)
 
@@ -163,6 +176,8 @@ class TaskStore:
         tasks = self._list_tasks_in_conn(conn, run_id, owner_role=owner_role or None)
 
         if kind == "raw_document" and owner_role == "extractor":
+            if str(inputs.get("retry_of_task_id") or ""):
+                return None
             artifact_id = str(inputs.get("artifact_id") or "")
             if artifact_id:
                 for task in tasks:
@@ -173,6 +188,20 @@ class TaskStore:
         if kind == "delivery_request" and owner_role == "writer":
             for task in tasks:
                 if task.kind == kind and task.status in ACTIVE_TASK_STATUSES:
+                    return task
+
+        if kind == "hard_acquisition" and owner_role == "browser_agent":
+            issue_key = str(inputs.get("issue_key") or "")
+            target_url = str(inputs.get("target_url") or "")
+            goal = _normalize_board_text(str(inputs.get("goal") or ""))
+            for task in tasks:
+                if task.kind != kind or task.status not in ACTIVE_TASK_STATUSES:
+                    continue
+                if issue_key and str(task.inputs.get("issue_key") or "") == issue_key:
+                    return task
+                if target_url and str(task.inputs.get("target_url") or "") == target_url:
+                    return task
+                if goal and _normalize_board_text(str(task.inputs.get("goal") or "")) == goal:
                     return task
 
         if kind == "repair_request":
@@ -195,6 +224,18 @@ class TaskStore:
                     if task.status not in {"pending", "leased", "done"}:
                         continue
                     if _evidence_bundle_key(task.inputs) == bundle_key:
+                        return task
+
+        if kind == "extraction_failure_review" and owner_role == "critic":
+            source_artifact_id = str(inputs.get("source_artifact_id") or "")
+            extractor_task_id = str(inputs.get("extractor_task_id") or "")
+            if source_artifact_id or extractor_task_id:
+                for task in tasks:
+                    if task.kind != kind or task.status not in {"pending", "leased", "done"}:
+                        continue
+                    if source_artifact_id and str(task.inputs.get("source_artifact_id") or "") == source_artifact_id:
+                        return task
+                    if extractor_task_id and str(task.inputs.get("extractor_task_id") or "") == extractor_task_id:
                         return task
 
         return None
@@ -377,6 +418,7 @@ class BoardStore:
         question_id: str | None,
         artifact_id: str | None = None,
         source_task_id: str | None = None,
+        issue_key: str | None = None,
     ) -> BoardItem:
         return self.store.create_swarm_board_item(
             run_id,
@@ -388,6 +430,7 @@ class BoardStore:
                 "source_url": evidence.source_url,
                 "confidence": evidence.confidence,
                 "freshness": evidence.freshness,
+                "issue_key": issue_key,
             },
             parent_id=question_id,
             evidence_id=evidence.evidence_id,
@@ -397,6 +440,26 @@ class BoardStore:
             created_by="extractor",
             dedupe_key=f"evidence:{evidence.evidence_id}",
         )
+
+    def issue_keys_for_evidence(self, run_id: str, evidence_ids: list[str]) -> list[str]:
+        evidence_id_set = {str(value) for value in evidence_ids if str(value)}
+        if not evidence_id_set:
+            return []
+
+        issue_keys: set[str] = set()
+        for item in self.store.list_swarm_board_items(run_id, kind="evidence"):
+            if item.evidence_id not in evidence_id_set:
+                continue
+            issue_key = str(item.payload.get("issue_key") or "").strip()
+            if issue_key:
+                issue_keys.add(issue_key)
+                continue
+            if item.source_task_id:
+                task = self.store.get_swarm_task(item.source_task_id)
+                task_issue_key = str(task.inputs.get("issue_key") or "").strip()
+                if task_issue_key:
+                    issue_keys.add(task_issue_key)
+        return sorted(issue_keys)
 
     def scoped_snapshot(
         self,
@@ -441,6 +504,47 @@ class BoardStore:
         current = self.store.get_swarm_board_item(item_id)
         merged = {**current.payload, **payload}
         return self.store.update_swarm_board_item(item_id, payload=merged)
+
+    def resolve_conflicts(
+        self,
+        run_id: str,
+        *,
+        issue_keys: list[str] | None = None,
+        evidence_ids: list[str] | None = None,
+        resolved_by: str,
+        reason: str,
+        resolution_event_at: str | None = None,
+    ) -> list[BoardItem]:
+        issue_key_set = {str(item) for item in (issue_keys or []) if str(item)}
+        evidence_id_set = {str(item) for item in (evidence_ids or []) if str(item)}
+        if not issue_key_set and not evidence_id_set:
+            return []
+
+        resolved: list[BoardItem] = []
+        for item in self.store.list_swarm_board_items(run_id, kind="conflict"):
+            if item.status not in {"open", "active"}:
+                continue
+            if resolution_event_at and item.created_at and item.created_at > resolution_event_at:
+                continue
+            payload = dict(item.payload or {})
+            conflict_issue_key = str(payload.get("issue_key") or "")
+            conflict_evidence_ids = {str(value) for value in list(payload.get("evidence_ids") or payload.get("conflicting_evidence_ids") or []) if str(value)}
+            if issue_key_set and conflict_issue_key in issue_key_set:
+                matched = True
+            elif evidence_id_set and conflict_evidence_ids and evidence_id_set.intersection(conflict_evidence_ids):
+                matched = True
+            else:
+                matched = False
+            if not matched:
+                continue
+            updated_payload = {
+                **payload,
+                "resolved_by": resolved_by,
+                "resolution_reason": reason,
+                "resolved_at": _utc_now(),
+            }
+            resolved.append(self.store.update_swarm_board_item(item.item_id or "", status="resolved", payload=updated_payload))
+        return resolved
 
     def mark_claims_for_question(self, run_id: str, *, question_id: str | None, status: str) -> list[BoardItem]:
         if not question_id:

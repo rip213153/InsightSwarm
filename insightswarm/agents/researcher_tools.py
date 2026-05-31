@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any
 from urllib.parse import urlparse
 
+from insightswarm.extraction_batches import create_extraction_batch
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
 from insightswarm.tools.core import ToolContext
 from insightswarm.tools.fetch import FetchUrlTool
 from insightswarm.tools.firecrawl import FirecrawlScrapeTool
 from insightswarm.tools.search import SearchTool
+from insightswarm.util import new_id
 
 
 RESEARCHER_ROLE = "researcher"
@@ -165,13 +169,28 @@ RESEARCHER_TOOLS = [
     },
     {
         "name": "suggest_browser_acquisition",
-        "description": "Suggest BrowserAgent escalation for a source or source class that static fetch cannot acquire reliably.",
+        "description": (
+            "Create a BrowserAgent hard_acquisition task for a source or source class that static fetch/Firecrawl cannot acquire reliably. "
+            "Use this when acquisition_pressure recommends browser_agent, or explicitly explain why not in failure_reflection."
+        ),
         "input_schema": {
             "type": "object",
-            "properties": {"target_url": {"type": "string"}, "goal": {"type": "string"}, "why_browser_needed": {"type": "string"}},
+            "properties": {
+                "target_url": {"type": "string"},
+                "goal": {"type": "string"},
+                "why_browser_needed": {"type": "string"},
+                "failed_attempts": {"type": "array", "items": {"type": "object"}},
+            },
             "required": ["goal", "why_browser_needed"],
         },
-        "output_schema": {"type": "object", "properties": {"suggestion_message_id": {"type": "string"}}},
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "suggestion_message_id": {"type": "string"},
+                "browser_task_id": {"type": "string"},
+                "deduped": {"type": "boolean"},
+            },
+        },
         "side_effects": "writes a suggestion message to shared memory",
     },
     {
@@ -226,6 +245,7 @@ class ResearcherToolState:
     task_context: dict[str, Any] | None = None
     candidate_sources: list[dict[str, Any]] = field(default_factory=list)
     fetched_documents: list[dict[str, Any]] = field(default_factory=list)
+    acquisition_failures: list[dict[str, Any]] = field(default_factory=list)
     created_task_ids: list[str] = field(default_factory=list)
     created_message_ids: list[str] = field(default_factory=list)
     created_artifact_ids: list[str] = field(default_factory=list)
@@ -308,6 +328,7 @@ class ResearcherToolHandlers:
             "conflicts": board.get("conflict", []),
             "plans": board.get("plan", []),
             "local_candidates": list(self.state.candidate_sources[-8:]),
+            "acquisition_pressure": _acquisition_pressure(self.state, self.task),
         }
 
     def search_web(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -329,7 +350,9 @@ class ResearcherToolHandlers:
             return {"ok": False, "error": "fetch_source requires url"}
         result = FetchUrlTool().run({"url": url}, ToolContext(run_id=self.task.run_id, task_id=self.task.task_id))
         if not result.ok:
-            return {"ok": False, "error": result.error, "document": {"url": url, "usable": False, "usability_reason": result.error or "fetch_failed"}}
+            document = {"url": url, "usable": False, "usability_reason": result.error or "fetch_failed"}
+            self._record_acquisition_failure(url=url, tool="fetch_source", reason=document["usability_reason"], document=document)
+            return {"ok": False, "error": result.error, "document": document, "acquisition_pressure": _acquisition_pressure(self.state, self.task)}
         document = dict(result.data)
         page_profile = _classify_page(document, url)
         visible_document = {
@@ -349,10 +372,13 @@ class ResearcherToolHandlers:
             "decision_reason": "" if visible_document["usable"] else visible_document["usability_reason"],
         }
         self.state.fetched_documents.append(document_record)
+        if not visible_document["usable"]:
+            self._record_acquisition_failure(url=url, tool="fetch_source", reason=visible_document["usability_reason"], document=visible_document)
         return {
             "ok": True,
             "document": visible_document,
             "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
+            "acquisition_pressure": _acquisition_pressure(self.state, self.task),
         }
 
     def firecrawl_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -363,7 +389,9 @@ class ResearcherToolHandlers:
             return {"ok": False, "error": "firecrawl_source requires url"}
         result = FirecrawlScrapeTool().run({"url": url}, ToolContext(run_id=self.task.run_id, task_id=self.task.task_id))
         if not result.ok:
-            return {"ok": False, "error": result.error, "document": {"url": url, "usable": False, "usability_reason": result.error or "firecrawl_failed"}}
+            document = {"url": url, "usable": False, "usability_reason": result.error or "firecrawl_failed"}
+            self._record_acquisition_failure(url=url, tool="firecrawl_source", reason=document["usability_reason"], document=document)
+            return {"ok": False, "error": result.error, "document": document, "acquisition_pressure": _acquisition_pressure(self.state, self.task)}
         document = dict(result.data)
         page_profile = _classify_page(document, url)
         visible_document = {
@@ -385,10 +413,13 @@ class ResearcherToolHandlers:
             "extract_goal": _safe_text(tool_input.get("extract_goal")),
         }
         self.state.fetched_documents.append(document_record)
+        if not visible_document["usable"]:
+            self._record_acquisition_failure(url=url, tool="firecrawl_source", reason=visible_document["usability_reason"], document=visible_document)
         return {
             "ok": True,
             "document": visible_document,
             "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
+            "acquisition_pressure": _acquisition_pressure(self.state, self.task),
         }
 
     def rank_sources(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -413,7 +444,7 @@ class ResearcherToolHandlers:
                     }
                 )
         ranked = sorted((_rank_source(source, goal) for source in sources), key=lambda item: item["score"], reverse=True)
-        return {"ok": True, "ranked_sources": ranked[:12]}
+        return {"ok": True, "ranked_sources": ranked[:12], "acquisition_pressure": _acquisition_pressure(self.state, self.task)}
 
     def publish_raw_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         if self.state.task_context is None:
@@ -424,6 +455,8 @@ class ResearcherToolHandlers:
             return {"ok": False, "error": "no usable fetched document is available"}
         artifact_ids: list[str] = []
         task_ids: list[str] = []
+        batch_id = new_id("batch")
+        issue_key = _safe_text(self.task.inputs.get("issue_key"))
         for document in documents:
             artifact = self.artifact_store.write_raw_document(
                 self.task.run_id,
@@ -437,7 +470,11 @@ class ResearcherToolHandlers:
                         "produced_by": RESEARCHER_ROLE,
                         "publish_reason": _safe_text(tool_input.get("why_ready")),
                         "page_profile": document.get("page_profile"),
+                        "issue_key": issue_key,
+                        "repair_attempt": self.task.inputs.get("repair_attempt"),
+                        "batch_id": batch_id,
                     },
+                    "batch_id": batch_id,
                 },
                 summary=_safe_text(document.get("title")) or _safe_text(document.get("source_url")) or "raw document",
             )
@@ -446,7 +483,13 @@ class ResearcherToolHandlers:
                 kind="raw_document",
                 status="pending",
                 owner_role=EXTRACTOR_ROLE,
-                inputs={"artifact_id": artifact.artifact_id, "source_task_id": self.task.task_id},
+                inputs={
+                    "artifact_id": artifact.artifact_id,
+                    "source_task_id": self.task.task_id,
+                    "issue_key": issue_key,
+                    "repair_attempt": self.task.inputs.get("repair_attempt"),
+                    "batch_id": batch_id,
+                },
                 depends_on=[],
                 priority=self.task.priority,
                 created_by=RESEARCHER_ROLE,
@@ -456,7 +499,7 @@ class ResearcherToolHandlers:
                 from_role=RESEARCHER_ROLE,
                 to_role=EXTRACTOR_ROLE,
                 message_type="request",
-                payload={"kind": "extract_evidence", "artifact_id": artifact.artifact_id},
+                payload={"kind": "extract_evidence", "artifact_id": artifact.artifact_id, "batch_id": batch_id},
                 related_task_id=extractor_task.task_id,
             )
             artifact_ids.append(artifact.artifact_id or "")
@@ -464,13 +507,26 @@ class ResearcherToolHandlers:
             self.state.created_message_ids.append(message.message_id or "")
             document["researcher_status"] = "published"
             document["decision_reason"] = _safe_text(tool_input.get("why_ready"))
+        create_extraction_batch(
+            board_store=self.board_store,
+            run_id=self.task.run_id,
+            batch_id=batch_id,
+            source_task_id=self.task.task_id or "",
+            raw_artifact_ids=artifact_ids,
+            extractor_task_ids=task_ids,
+            purpose=_safe_text(tool_input.get("why_ready")),
+            issue_key=issue_key,
+            priority=self.task.priority,
+        )
         self.state.created_artifact_ids.extend(artifact_ids)
         self.state.created_task_ids.extend(task_ids)
         return {
             "ok": True,
+            "batch_id": batch_id,
             "artifact_ids": artifact_ids,
             "extractor_task_ids": task_ids,
             "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
+            "acquisition_pressure": _acquisition_pressure(self.state, self.task),
         }
 
     def defer_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -501,13 +557,35 @@ class ResearcherToolHandlers:
 
     def suggest_browser_acquisition(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         goal = _safe_text(tool_input.get("goal"))
-        target_url = _safe_text(tool_input.get("target_url"))
+        pressure = _acquisition_pressure(self.state, self.task)
+        target_url = _safe_text(tool_input.get("target_url")) or _safe_text(pressure.get("latest_failed_url"))
+        issue_key = _safe_text(self.task.inputs.get("issue_key")) or _stable_browser_issue_key(goal=goal, target_url=target_url, reason=_safe_text(tool_input.get("why_browser_needed")))
+        failed_attempts = list(tool_input.get("failed_attempts") or pressure.get("failed_attempts") or [])
+        existing_browser_task = self._active_browser_task(issue_key=issue_key, target_url=target_url)
+        if existing_browser_task is not None:
+            message = self.mailbox.send(
+                self.task.run_id,
+                from_role=RESEARCHER_ROLE,
+                to_role=BROWSER_ROLE,
+                message_type="suggestion",
+                payload={"kind": "browser_already_requested", "task_id": existing_browser_task.task_id, "issue_key": issue_key, "goal": goal, "target_url": target_url},
+                related_task_id=existing_browser_task.task_id,
+            )
+            self.state.created_message_ids.append(message.message_id or "")
+            return {"ok": True, "suggestion_message_id": message.message_id, "browser_task_id": existing_browser_task.task_id, "deduped": True}
+
         browser_task = self.task_store.create(
             self.task.run_id,
             kind="hard_acquisition",
             status="pending",
             owner_role=BROWSER_ROLE,
-            inputs={"goal": goal, "target_url": target_url, "reason": _safe_text(tool_input.get("why_browser_needed"))},
+            inputs={
+                "goal": goal,
+                "target_url": target_url,
+                "reason": _safe_text(tool_input.get("why_browser_needed")),
+                "issue_key": issue_key,
+                "failed_attempts": failed_attempts,
+            },
             depends_on=[],
             priority=self.task.priority,
             created_by=RESEARCHER_ROLE,
@@ -517,12 +595,12 @@ class ResearcherToolHandlers:
             from_role=RESEARCHER_ROLE,
             to_role=BROWSER_ROLE,
             message_type="request",
-            payload={"kind": "hard_acquisition", "goal": goal, "target_url": target_url},
+            payload={"kind": "hard_acquisition", "goal": goal, "target_url": target_url, "issue_key": issue_key, "failed_attempts": failed_attempts},
             related_task_id=browser_task.task_id,
         )
         self.state.created_task_ids.append(browser_task.task_id or "")
         self.state.created_message_ids.append(message.message_id or "")
-        return {"ok": True, "suggestion_message_id": message.message_id, "browser_task_id": browser_task.task_id}
+        return {"ok": True, "suggestion_message_id": message.message_id, "browser_task_id": browser_task.task_id, "deduped": False}
 
     def write_observation(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         message = self.mailbox.send(
@@ -590,6 +668,30 @@ class ResearcherToolHandlers:
         self.state.terminal_status = status
         self.state.terminal_reason = reason
         return {"ok": True, "terminal": True, "status": status, "reason": reason}
+
+    def _record_acquisition_failure(self, *, url: str, tool: str, reason: str, document: dict[str, Any] | None = None) -> None:
+        failure = {
+            "url": url,
+            "tool": tool,
+            "reason": reason,
+            "domain": urlparse(url).netloc.lower(),
+            "failure_kind": _failure_kind(reason, document=document or {}),
+            "page_type": (document or {}).get("page_type"),
+            "information_density": (document or {}).get("information_density"),
+        }
+        self.state.acquisition_failures.append(failure)
+
+    def _active_browser_task(self, *, issue_key: str, target_url: str) -> Task | None:
+        for task in self.task_store.store.list_swarm_tasks(self.task.run_id):
+            if task.owner_role != BROWSER_ROLE or task.kind != "hard_acquisition" or task.status not in {"pending", "leased"}:
+                continue
+            task_issue_key = _safe_text(task.inputs.get("issue_key"))
+            task_target_url = _safe_text(task.inputs.get("target_url"))
+            if issue_key and task_issue_key == issue_key:
+                return task
+            if target_url and task_target_url == target_url:
+                return task
+        return None
 
 
 def _task_question(task: Task) -> str:
@@ -748,6 +850,77 @@ def _classify_page(document: dict[str, Any], url: str) -> dict[str, Any]:
     if len(text) < 1500:
         return {"page_type": "article", "estimated_information_density": "medium", "likely_extractable": True, "reason": "medium_text_density"}
     return {"page_type": "article", "estimated_information_density": "high", "likely_extractable": True, "reason": "sufficient_text_density"}
+
+
+def _acquisition_pressure(state: ResearcherToolState, task: Task) -> dict[str, Any]:
+    failures = list(state.acquisition_failures[-12:])
+    static_failures = [item for item in failures if item.get("tool") == "fetch_source"]
+    stronger_failures = [item for item in failures if item.get("tool") == "firecrawl_source"]
+    blocked_failures = [
+        item
+        for item in failures
+        if item.get("failure_kind") in {"http_403", "http_429", "verification_or_blocked", "blocked_page", "platform_shell_low_signal"}
+    ]
+    domains = sorted({str(item.get("domain") or "") for item in blocked_failures if item.get("domain")})
+    target_url = _latest_failed_url(blocked_failures) or _latest_failed_url(failures)
+    issue_key = _safe_text(task.inputs.get("issue_key"))
+    recommended = None
+    reason = ""
+    if len(static_failures) >= 2 and blocked_failures:
+        recommended = "browser_agent"
+        reason = "Multiple static fetch attempts are blocked or rate-limited."
+    if static_failures and stronger_failures and blocked_failures:
+        recommended = "browser_agent"
+        reason = "Static fetch and Firecrawl both failed or returned blocked/verification content."
+    return {
+        "static_fetch_failures": len(static_failures),
+        "firecrawl_failures": len(stronger_failures),
+        "blocked_or_rate_limited_failures": len(blocked_failures),
+        "blocked_domains": domains[:8],
+        "latest_failed_url": target_url,
+        "issue_key": issue_key,
+        "recommended_escalation": recommended,
+        "reason": reason,
+        "failed_attempts": failures,
+    }
+
+
+def _failure_kind(reason: str, *, document: dict[str, Any]) -> str:
+    lowered = f"{reason} {document.get('usability_reason') or ''} {document.get('page_type') or ''}".lower()
+    if "403" in lowered or "forbidden" in lowered:
+        return "http_403"
+    if "429" in lowered or "too many requests" in lowered or "rate limit" in lowered:
+        return "http_429"
+    if "captcha" in lowered or "verify" in lowered or "verification" in lowered or "access denied" in lowered:
+        return "verification_or_blocked"
+    if "platform_shell" in lowered:
+        return "platform_shell_low_signal"
+    if "blocked" in lowered:
+        return "blocked_page"
+    if "too_little_visible_text" in lowered or "low" in lowered:
+        return "low_signal"
+    return "fetch_failed"
+
+
+def _latest_failed_url(failures: list[dict[str, Any]]) -> str:
+    for item in reversed(failures):
+        url = _safe_text(item.get("url"))
+        if url:
+            return url
+    return ""
+
+
+def _stable_browser_issue_key(*, goal: str, target_url: str, reason: str) -> str:
+    normalized = json.dumps(
+        {
+            "goal": " ".join(goal.lower().split()),
+            "target_url": target_url.strip().lower(),
+            "reason": " ".join(reason.lower().split())[:300],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    return f"browser.{hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:16]}"
 
 
 def _select_publishable_documents(documents: list[dict[str, Any]], requested_urls: set[str]) -> list[dict[str, Any]]:

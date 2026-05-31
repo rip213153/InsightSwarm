@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
 from insightswarm.util import new_id
 
@@ -364,6 +370,59 @@ class CdpBrowserBackend:
         )
 
 
+class VisibleCdpBrowserBackend(CdpBrowserBackend):
+    backend_type = "visible_cdp"
+
+    def __init__(
+        self,
+        session_id: str | None = None,
+        cdp_url: str | None = None,
+        timeout: float = 5.0,
+        browser_exe: str | None = None,
+        user_data_dir: str | None = None,
+    ):
+        super().__init__(session_id=session_id, cdp_url=cdp_url, timeout=timeout)
+        self.browser_exe = browser_exe
+        self.user_data_dir = user_data_dir
+        self._process: subprocess.Popen[bytes] | None = None
+
+    def connect(self) -> None:
+        if self.cdp_url:
+            return super().connect()
+        self._launch_visible_browser()
+        return super().connect()
+
+    def close(self) -> None:
+        super().close()
+
+    def _launch_visible_browser(self) -> None:
+        if self._process and self._process.poll() is None:
+            return
+        browser_exe = self.browser_exe or _find_browser_executable()
+        if not browser_exe:
+            raise BrowserBackendUnavailable(
+                "browser backend unavailable: Chrome/Edge executable not found",
+                {"browser_backend_unavailable": True, "missing_browser_executable": True},
+            )
+        port = _find_free_port()
+        self.cdp_url = None
+        user_data_dir = self.user_data_dir or str(Path.cwd() / ".tmp" / "browser-profiles" / self.session_id)
+        Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+        args = [
+            browser_exe,
+            f"--remote-debugging-port={port}",
+            "--remote-allow-origins=*",
+            "--new-window",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--user-data-dir={user_data_dir}",
+            "about:blank",
+        ]
+        self._process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _wait_for_json_endpoint(port, self.timeout)
+        self.cdp_url = _discover_page_ws_url(port, self.timeout)
+
+
 class BrowserSession:
     def __init__(self, backend: str = "fake", session_id: str | None = None, cdp_url: str | None = None):
         self.backend_type = backend
@@ -372,7 +431,9 @@ class BrowserSession:
         self.backend = self._make_backend()
 
     def _make_backend(self):
-        if self.backend_type == "cdp":
+        if self.backend_type in {"cdp", "visible", "visible_cdp"}:
+            if self.backend_type in {"visible", "visible_cdp"} and not self.cdp_url:
+                return VisibleCdpBrowserBackend(self.session_id, self.cdp_url)
             return CdpBrowserBackend(self.session_id, self.cdp_url)
         return FakeBrowserBackend(self.session_id, self.cdp_url)
 
@@ -421,6 +482,68 @@ def _bbox_center(bbox: dict[str, Any]) -> tuple[float, float]:
     if width <= 0 or height <= 0:
         raise BrowserBackendUnavailable("browser target bbox is missing or not visible", {"error_kind": "bbox_missing"})
     return float(bbox.get("x") or 0) + width / 2, float(bbox.get("y") or 0) + height / 2
+
+
+def _find_browser_executable() -> str | None:
+    candidates = [
+        os.getenv("INSIGHTSWARM_BROWSER_EXE"),
+        shutil.which("chrome"),
+        shutil.which("chrome.exe"),
+        shutil.which("msedge"),
+        shutil.which("msedge.exe"),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _find_free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_json_endpoint(port: int, timeout: float) -> None:
+    deadline = time.time() + max(timeout, 1.0)
+    version_url = f"http://127.0.0.1:{port}/json/version"
+    while time.time() < deadline:
+        try:
+            with urlopen(version_url, timeout=1.0) as response:
+                if response.status == 200:
+                    return
+        except (URLError, OSError, TimeoutError):
+            time.sleep(0.2)
+    raise BrowserBackendUnavailable(
+        "browser backend unavailable: visible chrome did not expose the debugging endpoint in time",
+        {"browser_backend_unavailable": True, "debug_endpoint_timeout": True, "debug_port": port},
+    )
+
+
+def _discover_page_ws_url(port: int, timeout: float) -> str:
+    deadline = time.time() + max(timeout, 1.0)
+    while time.time() < deadline:
+        try:
+            with urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1.0) as response:
+                if response.status != 200:
+                    continue
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                for target in payload:
+                    if isinstance(target, dict) and target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
+                        return str(target["webSocketDebuggerUrl"])
+        except (URLError, OSError, TimeoutError, json.JSONDecodeError):
+            pass
+        time.sleep(0.2)
+    raise BrowserBackendUnavailable(
+        "browser backend unavailable: could not discover a page websocket url",
+        {"browser_backend_unavailable": True, "missing_page_websocket": True},
+    )
 
 
 def _normalize_page_state(value: dict[str, Any], max_elements: int, max_text_chars: int) -> dict[str, Any]:

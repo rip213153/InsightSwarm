@@ -30,6 +30,22 @@ CRITIC_TOOLS = [
         "side_effects": "none",
     },
     {
+        "name": "read_evidence_map",
+        "description": "Read a compact source/claim map for large evidence bundles without loading every quote in full.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "evidence_count": {"type": "integer"},
+                "source_count": {"type": "integer"},
+                "sources": {"type": "array"},
+                "coverage": {"type": "object"},
+                "recommended_detail_reads": {"type": "array"},
+            },
+        },
+        "side_effects": "none",
+    },
+    {
         "name": "validate_evidence_bundle",
         "description": "Run deterministic checks before model criticism: evidence exists, source URL exists, quotes exist, citation payloads are readable, and quote fields match.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
@@ -136,6 +152,7 @@ class CriticToolHandlers:
         return {
             "read_review_task": self._guard_after_repair("read_review_task", self.read_review_task),
             "read_evidence_bundle": self._guard_after_repair("read_evidence_bundle", self.read_evidence_bundle),
+            "read_evidence_map": self._guard_after_repair("read_evidence_map", self.read_evidence_map),
             "validate_evidence_bundle": self._guard_after_repair("validate_evidence_bundle", self.validate_evidence_bundle),
             "write_challenge": self._guard_after_repair("write_challenge", self.write_challenge),
             "request_repair": self._guard_after_repair("request_repair", self.request_repair),
@@ -165,28 +182,93 @@ class CriticToolHandlers:
         return {
             "ok": True,
             "task_id": self.task.task_id,
+            "review_type": "extraction_failure" if self.task.kind == "extraction_failure_review" else "evidence_review",
             "question": str(self.task.inputs.get("question") or self.task_store.store.get_swarm_run_state(self.task.run_id).objective),
             "evidence_ids": evidence_ids,
+            "source_artifact_id": self.task.inputs.get("source_artifact_id"),
+            "failure_reason": self.task.inputs.get("failure_reason"),
+            "targeted_query": self.task.inputs.get("targeted_query"),
             "issue_key": self.task.inputs.get("issue_key"),
+            "evidence_scope": self.task.inputs.get("evidence_scope") or "batch",
+            "batch_id": self.task.inputs.get("batch_id"),
+            "batch_ids": self.task.inputs.get("batch_ids") or [],
+            "partial_bundle": bool(self.task.inputs.get("partial_bundle")),
+            "batch_statuses": self.task.inputs.get("batch_statuses") or {},
+            "evidence_bundle_key": self.task.inputs.get("evidence_bundle_key"),
             "repair_attempt": self.task.inputs.get("repair_attempt"),
             "max_repair_attempts": self.task.inputs.get("max_repair_attempts") or DEFAULT_MAX_REPAIR_ATTEMPTS,
         }
 
     def read_evidence_bundle(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         del tool_input
-        if not self.state.evidence_ids:
-            self.state.evidence_ids = [str(item) for item in list(self.task.inputs.get("evidence_ids") or []) if str(item)]
-        bundle: list[dict[str, Any]] = []
-        for evidence in self.artifact_store.store.list_swarm_evidence(self.task.run_id):
-            if self.state.evidence_ids and evidence.evidence_id not in self.state.evidence_ids:
-                continue
-            bundle.append(self._summarize_evidence(evidence))
+        bundle = self._load_evidence_bundle()
         self.state.evidence_bundle = bundle
         return {"ok": True, "evidence": bundle}
+
+    def read_evidence_map(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        del tool_input
+        bundle = self._load_evidence_bundle()
+        self.state.evidence_bundle = bundle
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for item in bundle:
+            by_source.setdefault(_safe_text(item.get("source_url")) or "unknown", []).append(item)
+
+        sources: list[dict[str, Any]] = []
+        primary_sources = 0
+        secondary_sources = 0
+        forward_looking_claims = 0
+        recommended_detail_reads: list[str] = []
+        for source_url, items in sorted(by_source.items()):
+            claims = [_safe_text(item.get("claim")) for item in items if _safe_text(item.get("claim"))]
+            quotes = [_shorten(_safe_text(item.get("quote")), 220) for item in items if _safe_text(item.get("quote"))]
+            source_category = _source_category(source_url)
+            risk_flags = _source_risks(source_url, items)
+            if source_category == "primary_source":
+                primary_sources += 1
+            else:
+                secondary_sources += 1
+            forward_looking_claims += sum(1 for claim in claims if _looks_forward_looking(claim))
+            if items:
+                recommended_detail_reads.append(str(items[0].get("evidence_id") or ""))
+            sources.append(
+                {
+                    "source_url": source_url,
+                    "source_category": source_category,
+                    "risk_flags": risk_flags,
+                    "evidence_ids": [item.get("evidence_id") for item in items],
+                    "evidence_count": len(items),
+                    "claims": claims[:8],
+                    "representative_quotes": quotes[:2],
+                }
+            )
+
+        return {
+            "ok": True,
+            "evidence_count": len(bundle),
+            "source_count": len(sources),
+            "sources": sources,
+            "coverage": {
+                "primary_sources": primary_sources,
+                "secondary_sources": secondary_sources,
+                "independent_sources": len(sources),
+                "forward_looking_claims": forward_looking_claims,
+                "ready_evidence": sum(1 for item in bundle if item.get("qa_state") == "ready"),
+            },
+            "recommended_detail_reads": [item for item in recommended_detail_reads if item],
+            "note": "This is a compact map for subjective coverage judgment. Deterministic validation still checks the full scoped evidence set.",
+        }
 
     def validate_evidence_bundle(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         del tool_input
         must_fix: list[str] = []
+        if self.task.kind == "extraction_failure_review":
+            reason = _safe_text(self.task.inputs.get("failure_reason")) or "Extractor could not create quote-backed citations."
+            must_fix.append(f"Extraction failed before evidence review: {reason}")
+            validation = {"passed": False, "must_fix": must_fix}
+            self.state.validation = validation
+            return {"ok": True, **validation}
+        if not self.state.evidence_bundle:
+            self.state.evidence_bundle = self._load_evidence_bundle()
         if not self.state.evidence_bundle:
             must_fix.append("No evidence is present in the review bundle.")
         for item in self.state.evidence_bundle:
@@ -321,16 +403,36 @@ class CriticToolHandlers:
         return {"ok": True, "conflict_id": conflict.item_id, "message_id": message.message_id}
 
     def mark_review_passed(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        reason = _safe_text(tool_input.get("reason"))
+        issue_keys = [
+            str(self.task.inputs.get("issue_key") or "").strip(),
+            *self.board_store.issue_keys_for_evidence(self.task.run_id, list(self.state.evidence_ids)),
+        ]
+        resolved_conflicts = self.board_store.resolve_conflicts(
+            self.task.run_id,
+            issue_keys=[key for key in issue_keys if key],
+            evidence_ids=list(self.state.evidence_ids),
+            resolved_by=CRITIC_ROLE,
+            reason=reason or "Critic passed the repaired evidence bundle.",
+        )
         message = self.mailbox.send(
             self.task.run_id,
             from_role=CRITIC_ROLE,
             broadcast=True,
             message_type="response",
-            payload={"kind": "pass", "verdict": "pass", "reason": _safe_text(tool_input.get("reason")), "confidence": tool_input.get("confidence"), "evidence_ids": list(self.state.evidence_ids)},
+            payload={
+                "kind": "pass",
+                "verdict": "pass",
+                "reason": reason,
+                "confidence": tool_input.get("confidence"),
+                "evidence_ids": list(self.state.evidence_ids),
+                "resolved_conflict_ids": [item.item_id for item in resolved_conflicts],
+            },
             related_task_id=self.task.task_id,
         )
         self.state.created_message_ids.append(message.message_id or "")
-        return {"ok": True, "message_id": message.message_id}
+        self.state.created_board_item_ids.extend([item.item_id or "" for item in resolved_conflicts])
+        return {"ok": True, "message_id": message.message_id, "resolved_conflict_ids": [item.item_id for item in resolved_conflicts]}
 
     def finish_review(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         status = _safe_text(tool_input.get("status")) or "complete"
@@ -362,6 +464,16 @@ class CriticToolHandlers:
             "title": payload.get("title"),
         }
 
+    def _load_evidence_bundle(self) -> list[dict[str, Any]]:
+        if not self.state.evidence_ids:
+            self.state.evidence_ids = [str(item) for item in list(self.task.inputs.get("evidence_ids") or []) if str(item)]
+        bundle: list[dict[str, Any]] = []
+        for evidence in self.artifact_store.store.list_swarm_evidence(self.task.run_id):
+            if self.state.evidence_ids and evidence.evidence_id not in self.state.evidence_ids:
+                continue
+            bundle.append(self._summarize_evidence(evidence))
+        return bundle
+
     def _has_active_repair(self, issue_key: str) -> bool:
         for task in self.task_store.list_active(self.task.run_id):
             if task.kind in {"research_repair", "repair_request"} and str(task.inputs.get("issue_key") or "") == issue_key:
@@ -386,3 +498,60 @@ def _safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _shorten(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "..."
+
+
+def _source_category(source_url: str) -> str:
+    lower = source_url.lower()
+    if "openai.com" in lower or "blog.samaltman.com" in lower:
+        return "primary_source"
+    if any(domain in lower for domain in ["reuters.com", "apnews.com", "arstechnica.com", "nytimes.com", "economictimes.com"]):
+        return "news"
+    if any(domain in lower for domain in ["community.openai.com", "lesswrong.com", "reddit.com", "zhihu.com"]):
+        return "forum_or_discussion"
+    return "secondary_source"
+
+
+def _source_risks(source_url: str, items: list[dict[str, Any]]) -> list[str]:
+    risks: list[str] = []
+    lower = source_url.lower()
+    if _source_category(source_url) != "primary_source":
+        risks.append("non_primary_source")
+    if any(domain in lower for domain in ["reddit.com", "zhihu.com", "wallstreetcn.com", "reuters.com", "nytimes.com"]):
+        risks.append("may_be_blocked_or_paywalled")
+    if len(items) > 5:
+        risks.append("source_dominates_bundle")
+    if any(float(item.get("confidence") or 0.0) < 0.7 for item in items):
+        risks.append("low_confidence_evidence")
+    return risks
+
+
+def _looks_forward_looking(value: str) -> bool:
+    lower = value.lower()
+    markers = [
+        "next",
+        "future",
+        "plan",
+        "aim",
+        "will",
+        "2025",
+        "2026",
+        "roadmap",
+        "launch",
+        "release",
+        "agent",
+        "agi",
+        "superintelligence",
+        "下一步",
+        "未来",
+        "计划",
+        "发布",
+        "智能体",
+        "超级智能",
+    ]
+    return any(marker in lower for marker in markers)

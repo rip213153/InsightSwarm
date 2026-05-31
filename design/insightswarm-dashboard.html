@@ -1,0 +1,1190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InsightSwarm Intelligence Runtime Design Draft</title>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  <style>
+    :root {
+      --bg: #11110f;
+      --ink: #f4f0e6;
+      --muted: #a9a497;
+      --line: rgba(244, 240, 230, 0.15);
+      --panel: rgba(29, 28, 24, 0.86);
+      --panel-strong: rgba(39, 37, 31, 0.96);
+      --researcher: #44d7b6;
+      --extractor: #f1c84b;
+      --critic: #ff6f61;
+      --browser: #59b7ff;
+      --writer: #d7e36a;
+      --storage: #f4f0e6;
+      --shadow: rgba(0, 0, 0, 0.38);
+      --radius: 8px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(244, 240, 230, 0.045) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(244, 240, 230, 0.032) 1px, transparent 1px),
+        radial-gradient(circle at 50% 0%, rgba(241, 200, 75, 0.13), transparent 34rem),
+        linear-gradient(135deg, #11110f 0%, #181712 48%, #0f1412 100%);
+      background-size: 48px 48px, 48px 48px, auto, auto;
+      overflow-x: hidden;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    .shell {
+      width: min(1600px, 100%);
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .topbar {
+      min-height: 74px;
+      border: 1px solid var(--line);
+      background: rgba(17, 17, 15, 0.76);
+      box-shadow: 0 18px 42px var(--shadow);
+      backdrop-filter: blur(18px);
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      align-items: center;
+      gap: 18px;
+      padding: 14px 16px;
+      border-radius: var(--radius);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      border: 1px solid rgba(244, 240, 230, 0.36);
+      border-radius: 50%;
+      position: relative;
+      flex: 0 0 auto;
+      background:
+        linear-gradient(90deg, transparent 48%, rgba(244, 240, 230, 0.52) 48%, rgba(244, 240, 230, 0.52) 52%, transparent 52%),
+        linear-gradient(0deg, transparent 48%, rgba(244, 240, 230, 0.52) 48%, rgba(244, 240, 230, 0.52) 52%, transparent 52%);
+    }
+
+    .mark::before,
+    .mark::after {
+      content: "";
+      position: absolute;
+      inset: 9px;
+      border: 1px solid var(--researcher);
+      transform: rotate(30deg);
+    }
+
+    .mark::after {
+      inset: 15px;
+      border-color: var(--extractor);
+      transform: rotate(-18deg);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 21px;
+      line-height: 1.05;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .brand p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .run-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .status-pill {
+      min-height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 11px;
+      color: var(--ink);
+      background: rgba(244, 240, 230, 0.06);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .status-pill strong {
+      color: var(--writer);
+      font-weight: 720;
+    }
+
+    .command {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      min-width: min(360px, 100%);
+      height: 42px;
+      border: 1px solid rgba(244, 240, 230, 0.2);
+      background: rgba(244, 240, 230, 0.07);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .command input {
+      min-width: 0;
+      height: 100%;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--ink);
+      padding: 0 12px;
+    }
+
+    .command button {
+      height: 100%;
+      min-width: 48px;
+      border: 0;
+      border-left: 1px solid var(--line);
+      color: #11110f;
+      background: var(--writer);
+      cursor: pointer;
+      font-weight: 760;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(260px, 320px) minmax(420px, 1fr) minmax(280px, 360px);
+      gap: 16px;
+      min-height: 0;
+    }
+
+    .rail,
+    .inspector {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: var(--radius);
+      box-shadow: 0 16px 38px var(--shadow);
+      backdrop-filter: blur(18px);
+      min-width: 0;
+    }
+
+    .panel-header {
+      min-height: 42px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+    }
+
+    .panel-header h2,
+    .panel-header h3 {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.2;
+      font-weight: 760;
+    }
+
+    .panel-header span {
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .agents {
+      padding: 8px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .agent-row {
+      min-height: 72px;
+      width: 100%;
+      border: 1px solid rgba(244, 240, 230, 0.12);
+      background: rgba(244, 240, 230, 0.045);
+      color: var(--ink);
+      border-radius: var(--radius);
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 10px;
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+    }
+
+    .agent-row:hover,
+    .agent-row.active {
+      background: rgba(244, 240, 230, 0.085);
+      border-color: color-mix(in srgb, var(--tone), white 20%);
+      transform: translateY(-1px);
+    }
+
+    .agent-glyph {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      border: 1px solid var(--tone);
+      display: grid;
+      place-items: center;
+      color: var(--tone);
+      position: relative;
+    }
+
+    .agent-glyph::before {
+      content: "";
+      width: 16px;
+      height: 16px;
+      border: 2px solid currentColor;
+      transform: rotate(45deg);
+    }
+
+    .agent-copy {
+      min-width: 0;
+    }
+
+    .agent-copy strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .agent-copy small {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+      margin-top: 3px;
+    }
+
+    .agent-metric {
+      color: var(--tone);
+      font-variant-numeric: tabular-nums;
+      font-size: 15px;
+      font-weight: 760;
+    }
+
+    .queue {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .queue-line {
+      min-height: 48px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      border-bottom: 1px solid rgba(244, 240, 230, 0.1);
+      padding-bottom: 10px;
+    }
+
+    .queue-line:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--tone);
+      box-shadow: 0 0 18px var(--tone);
+    }
+
+    .queue-line strong {
+      display: block;
+      font-size: 12px;
+      line-height: 1.3;
+    }
+
+    .queue-line small,
+    .queue-line time {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .stage {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: minmax(520px, 1fr) auto;
+      gap: 16px;
+    }
+
+    .map {
+      position: relative;
+      overflow: hidden;
+      min-height: 520px;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, rgba(244, 240, 230, 0.07), transparent 28%),
+        linear-gradient(45deg, rgba(68, 215, 182, 0.08), transparent 32%),
+        rgba(17, 17, 15, 0.72);
+      border-radius: var(--radius);
+      box-shadow: 0 18px 46px var(--shadow);
+      isolation: isolate;
+    }
+
+    .map-grid {
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(244, 240, 230, 0.075) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(244, 240, 230, 0.045) 1px, transparent 1px);
+      background-size: 72px 72px;
+      mask-image: radial-gradient(circle at center, #000 20%, transparent 75%);
+      opacity: 0.74;
+      z-index: -1;
+    }
+
+    .map-title {
+      position: absolute;
+      top: 16px;
+      left: 18px;
+      right: 18px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 18px;
+      z-index: 3;
+    }
+
+    .map-title h2 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .map-title p {
+      margin: 7px 0 0;
+      color: var(--muted);
+      max-width: 550px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .legend {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .legend span {
+      min-height: 26px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 8px;
+      color: var(--muted);
+      background: rgba(244, 240, 230, 0.05);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .graph {
+      position: absolute;
+      inset: 88px 12px 18px;
+    }
+
+    .edge {
+      position: absolute;
+      height: 2px;
+      transform-origin: 0 50%;
+      background: linear-gradient(90deg, transparent, var(--edge), transparent);
+      opacity: 0.72;
+    }
+
+    .edge::after {
+      content: "";
+      position: absolute;
+      top: -3px;
+      left: 0;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--edge);
+      box-shadow: 0 0 18px var(--edge);
+      animation: packet 3.8s linear infinite;
+    }
+
+    @keyframes packet {
+      from { transform: translateX(0); opacity: 0; }
+      12% { opacity: 1; }
+      88% { opacity: 1; }
+      to { transform: translateX(var(--edge-width)); opacity: 0; }
+    }
+
+    .node {
+      position: absolute;
+      width: 132px;
+      min-height: 78px;
+      transform: translate(-50%, -50%);
+      border: 1px solid color-mix(in srgb, var(--tone), white 14%);
+      background: rgba(17, 17, 15, 0.86);
+      border-radius: var(--radius);
+      padding: 10px;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+      cursor: pointer;
+    }
+
+    .node strong {
+      display: block;
+      color: var(--tone);
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .node small {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .node .load {
+      margin-top: 9px;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(244, 240, 230, 0.12);
+      overflow: hidden;
+    }
+
+    .node .load i {
+      display: block;
+      width: var(--load);
+      height: 100%;
+      background: var(--tone);
+    }
+
+    .node.storage {
+      width: 176px;
+      min-height: 116px;
+      left: 50%;
+      top: 50%;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      border-color: rgba(244, 240, 230, 0.5);
+      background:
+        linear-gradient(180deg, rgba(244, 240, 230, 0.18), rgba(244, 240, 230, 0.05)),
+        rgba(17, 17, 15, 0.9);
+    }
+
+    .node.storage strong {
+      color: var(--storage);
+      font-size: 15px;
+    }
+
+    .node.storage::before {
+      content: "";
+      position: absolute;
+      inset: -28px;
+      border-radius: 50%;
+      border: 1px dashed rgba(244, 240, 230, 0.2);
+      animation: orbit 18s linear infinite;
+      pointer-events: none;
+    }
+
+    .node.storage::after {
+      content: "";
+      position: absolute;
+      inset: -62px;
+      border-radius: 50%;
+      border: 1px solid rgba(68, 215, 182, 0.14);
+      animation: orbit 26s linear infinite reverse;
+      pointer-events: none;
+    }
+
+    @keyframes orbit {
+      to { transform: rotate(360deg); }
+    }
+
+    .metrics-band {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+
+    .metric {
+      min-height: 96px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: var(--radius);
+      padding: 13px;
+      box-shadow: 0 16px 36px var(--shadow);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 26px;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .metric i {
+      display: block;
+      width: 100%;
+      height: 4px;
+      margin-top: 13px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--tone) var(--value), rgba(244, 240, 230, 0.12) 0);
+    }
+
+    .evidence-list,
+    .critic-list,
+    .report-preview {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .evidence-item {
+      border-left: 3px solid var(--tone);
+      padding: 2px 0 2px 10px;
+      min-height: 58px;
+    }
+
+    .evidence-item strong {
+      display: block;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .evidence-item small {
+      display: block;
+      color: var(--muted);
+      margin-top: 5px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .critic-item {
+      min-height: 46px;
+      border: 1px solid rgba(244, 240, 230, 0.1);
+      border-radius: var(--radius);
+      padding: 10px;
+      background: rgba(244, 240, 230, 0.04);
+    }
+
+    .critic-item strong {
+      display: block;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .critic-item small {
+      color: var(--muted);
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .report-preview {
+      background: var(--panel-strong);
+    }
+
+    .report-preview h3 {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.3;
+    }
+
+    .report-preview p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .source-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 2px;
+    }
+
+    .source-tags span {
+      min-height: 25px;
+      border: 1px solid rgba(244, 240, 230, 0.15);
+      border-radius: 999px;
+      padding: 5px 8px;
+      color: var(--ink);
+      background: rgba(244, 240, 230, 0.05);
+      font-size: 11px;
+    }
+
+    .focus-card {
+      padding: 14px;
+      min-height: 164px;
+    }
+
+    .focus-card h2 {
+      margin: 0;
+      color: var(--tone);
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .focus-card p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.62;
+    }
+
+    .focus-stats {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .focus-stats span {
+      min-height: 54px;
+      border: 1px solid rgba(244, 240, 230, 0.12);
+      border-radius: var(--radius);
+      display: grid;
+      align-content: center;
+      padding: 8px;
+      background: rgba(244, 240, 230, 0.04);
+    }
+
+    .focus-stats b {
+      font-size: 17px;
+      line-height: 1;
+      color: var(--tone);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .focus-stats small {
+      color: var(--muted);
+      font-size: 10px;
+      margin-top: 4px;
+    }
+
+    .handoff {
+      padding: 12px;
+      min-height: 150px;
+    }
+
+    .handoff-track {
+      height: 112px;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      align-items: center;
+      gap: 6px;
+      position: relative;
+    }
+
+    .handoff-track::before {
+      content: "";
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: 50%;
+      height: 1px;
+      background: rgba(244, 240, 230, 0.2);
+    }
+
+    .step {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 10px;
+      text-align: center;
+    }
+
+    .step i {
+      width: 25px;
+      height: 25px;
+      border-radius: 50%;
+      background: var(--tone);
+      box-shadow: 0 0 20px var(--tone);
+    }
+
+    @media (max-width: 1180px) {
+      .workspace {
+        grid-template-columns: minmax(240px, 300px) minmax(420px, 1fr);
+      }
+
+      .inspector {
+        grid-column: 1 / -1;
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    @media (max-width: 860px) {
+      .shell {
+        padding: 12px;
+      }
+
+      .topbar,
+      .workspace,
+      .inspector,
+      .metrics-band {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar {
+        align-items: stretch;
+      }
+
+      .run-strip {
+        justify-content: flex-start;
+      }
+
+      .command {
+        min-width: 0;
+      }
+
+      .stage {
+        grid-template-rows: auto auto;
+      }
+
+      .map {
+        min-height: 720px;
+      }
+
+      .map-title {
+        position: relative;
+        top: auto;
+        left: auto;
+        right: auto;
+        padding: 16px;
+        display: grid;
+      }
+
+      .legend {
+        justify-content: flex-start;
+      }
+
+      .graph {
+        position: relative;
+        inset: auto;
+        min-height: 595px;
+      }
+
+      .edge {
+        opacity: 0.45;
+      }
+
+      .node {
+        width: 126px;
+      }
+
+      .node.storage {
+        width: 156px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <h1>InsightSwarm</h1>
+          <p>去中心化 multi-agent 情报运行台</p>
+        </div>
+      </div>
+
+      <div class="run-strip" aria-label="运行状态">
+        <span class="status-pill">Run <strong>rs-42a9</strong></span>
+        <span class="status-pill">共享存储 WAL online</span>
+        <span class="status-pill">Delivery gate <strong>locked</strong></span>
+      </div>
+
+      <form class="command">
+        <input value="ExampleCo pricing / source trust / risk delta" aria-label="research objective" />
+        <button type="button" aria-label="start run">Go</button>
+      </form>
+    </header>
+
+    <section class="workspace">
+      <aside class="rail">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Agent Mesh</h2>
+            <span>lease + mailbox</span>
+          </div>
+          <div class="agents">
+            <button class="agent-row active" data-agent="Researcher" style="--tone: var(--researcher)">
+              <span class="agent-glyph" aria-hidden="true"></span>
+              <span class="agent-copy">
+                <strong>Researcher</strong>
+                <small>提出问题、拓展候选源、发布 raw source</small>
+              </span>
+              <span class="agent-metric">03</span>
+            </button>
+            <button class="agent-row" data-agent="Extractor" style="--tone: var(--extractor)">
+              <span class="agent-glyph" aria-hidden="true"></span>
+              <span class="agent-copy">
+                <strong>Extractor</strong>
+                <small>清洗文本、抽取 quote-backed citation</small>
+              </span>
+              <span class="agent-metric">12</span>
+            </button>
+            <button class="agent-row" data-agent="Critic" style="--tone: var(--critic)">
+              <span class="agent-glyph" aria-hidden="true"></span>
+              <span class="agent-copy">
+                <strong>Critic</strong>
+                <small>审查证据、标记冲突、触发修复</small>
+              </span>
+              <span class="agent-metric">04</span>
+            </button>
+            <button class="agent-row" data-agent="Browser" style="--tone: var(--browser)">
+              <span class="agent-glyph" aria-hidden="true"></span>
+              <span class="agent-copy">
+                <strong>Browser</strong>
+                <small>受控观测页面、交付候选 source</small>
+              </span>
+              <span class="agent-metric">02</span>
+            </button>
+            <button class="agent-row" data-agent="Writer" style="--tone: var(--writer)">
+              <span class="agent-glyph" aria-hidden="true"></span>
+              <span class="agent-copy">
+                <strong>Writer</strong>
+                <small>只消费 QA-passed evidence 并输出报告</small>
+              </span>
+              <span class="agent-metric">01</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Shared Queue</h3>
+            <span>bounded tasks</span>
+          </div>
+          <div class="queue">
+            <div class="queue-line" style="--tone: var(--researcher)">
+              <i class="dot"></i>
+              <div>
+                <strong>spawn follow-up: pricing archive</strong>
+                <small>created_by researcher</small>
+              </div>
+              <time>00:18</time>
+            </div>
+            <div class="queue-line" style="--tone: var(--browser)">
+              <i class="dot"></i>
+              <div>
+                <strong>browser.page_state gated replay</strong>
+                <small>human authorization pending</small>
+              </div>
+              <time>02:41</time>
+            </div>
+            <div class="queue-line" style="--tone: var(--critic)">
+              <i class="dot"></i>
+              <div>
+                <strong>evidence_review bundle-7</strong>
+                <small>freshness conflict open</small>
+              </div>
+              <time>03:05</time>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="stage">
+        <section class="map" aria-label="swarm intelligence map">
+          <div class="map-grid" aria-hidden="true"></div>
+          <div class="map-title">
+            <div>
+              <h2>Swarm Runtime Map</h2>
+              <p>共享存储不是“数据库后台”，而是所有 agent 的协作现场：task lease、mailbox、artifact、evidence 和 delivery gate 都在这里形成可审计链路。</p>
+            </div>
+            <div class="legend">
+              <span>task lease</span>
+              <span>mailbox</span>
+              <span>artifact</span>
+              <span>QA gate</span>
+            </div>
+          </div>
+
+          <div class="graph" id="graph">
+            <div class="edge" style="--edge: var(--researcher); --edge-width: 248px; width: 248px; left: 23%; top: 26%; transform: rotate(28deg);"></div>
+            <div class="edge" style="--edge: var(--extractor); --edge-width: 226px; width: 226px; left: 62%; top: 28%; transform: rotate(141deg);"></div>
+            <div class="edge" style="--edge: var(--critic); --edge-width: 224px; width: 224px; left: 70%; top: 70%; transform: rotate(214deg);"></div>
+            <div class="edge" style="--edge: var(--browser); --edge-width: 230px; width: 230px; left: 19%; top: 72%; transform: rotate(327deg);"></div>
+            <div class="edge" style="--edge: var(--writer); --edge-width: 190px; width: 190px; left: 50%; top: 50%; transform: rotate(90deg);"></div>
+
+            <button class="node storage" data-agent="Shared Store" style="--tone: var(--storage); --load: 79%;">
+              <span>
+                <strong>Shared Storage</strong>
+                <small>SQLite WAL + artifacts + board + mailbox</small>
+              </span>
+            </button>
+            <button class="node" data-agent="Researcher" style="--tone: var(--researcher); --load: 68%; left: 22%; top: 22%;">
+              <strong>Researcher</strong>
+              <small>source frontier</small>
+              <span class="load"><i></i></span>
+            </button>
+            <button class="node" data-agent="Extractor" style="--tone: var(--extractor); --load: 82%; left: 78%; top: 24%;">
+              <strong>Extractor</strong>
+              <small>citation factory</small>
+              <span class="load"><i></i></span>
+            </button>
+            <button class="node" data-agent="Critic" style="--tone: var(--critic); --load: 46%; left: 77%; top: 74%;">
+              <strong>Critic</strong>
+              <small>skeptic review</small>
+              <span class="load"><i></i></span>
+            </button>
+            <button class="node" data-agent="Browser" style="--tone: var(--browser); --load: 38%; left: 21%; top: 76%;">
+              <strong>Browser</strong>
+              <small>safe acquisition</small>
+              <span class="load"><i></i></span>
+            </button>
+            <button class="node" data-agent="Writer" style="--tone: var(--writer); --load: 24%; left: 50%; top: 91%;">
+              <strong>Writer</strong>
+              <small>delivery boundary</small>
+              <span class="load"><i></i></span>
+            </button>
+          </div>
+        </section>
+
+        <section class="metrics-band" aria-label="run metrics">
+          <div class="metric" style="--tone: var(--researcher); --value: 72%;">
+            <strong>72%</strong>
+            <span>frontier coverage</span>
+            <i></i>
+          </div>
+          <div class="metric" style="--tone: var(--extractor); --value: 12%;">
+            <strong>12</strong>
+            <span>quote-backed citations</span>
+            <i></i>
+          </div>
+          <div class="metric" style="--tone: var(--critic); --value: 33%;">
+            <strong>04</strong>
+            <span>open evidence conflicts</span>
+            <i></i>
+          </div>
+          <div class="metric" style="--tone: var(--writer); --value: 58%;">
+            <strong>58%</strong>
+            <span>delivery readiness</span>
+            <i></i>
+          </div>
+        </section>
+      </section>
+
+      <aside class="inspector">
+        <section class="panel focus-card" id="focusCard" style="--tone: var(--researcher)">
+          <h2 id="focusTitle">Researcher</h2>
+          <p id="focusText">当前焦点：从目标问题拆出 source frontier，发布 raw document 或候选 source；所有发现都必须经过 Extractor 与 Critic 才能成为正式证据。</p>
+          <div class="focus-stats">
+            <span><b id="focusA">03</b><small>active tasks</small></span>
+            <span><b id="focusB">08</b><small>messages</small></span>
+            <span><b id="focusC">05</b><small>artifacts</small></span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Evidence Chain</h3>
+            <span>formal only</span>
+          </div>
+          <div class="evidence-list">
+            <div class="evidence-item" style="--tone: var(--extractor)">
+              <strong>pricing quote matched cleaned document</strong>
+              <small>confidence 0.91 · qa_state accepted · source_url primary</small>
+            </div>
+            <div class="evidence-item" style="--tone: var(--browser)">
+              <strong>browser candidate promoted to raw_document</strong>
+              <small>not formal until extraction + QA completes</small>
+            </div>
+            <div class="evidence-item" style="--tone: var(--critic)">
+              <strong>freshness gap: stale billing-cycle page</strong>
+              <small>repair request opened for targeted follow-up</small>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Critic Board</h3>
+            <span>repair pressure</span>
+          </div>
+          <div class="critic-list">
+            <div class="critic-item">
+              <strong>Do not cite synthetic fallback in production report.</strong>
+              <small>negative constraint from QA repair contract</small>
+            </div>
+            <div class="critic-item">
+              <strong>Resolve monthly vs yearly equivalence before delivery.</strong>
+              <small>conflict normalization required</small>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel report-preview">
+          <h3>Writer Preview</h3>
+          <p>报告区只展示 citation-backed findings；当证据不足时输出 report_blocked，而不是制造看似完整的情报结论。</p>
+          <div class="source-tags">
+            <span>citations.json</span>
+            <span>qa_report.json</span>
+            <span>report.md</span>
+          </div>
+        </section>
+
+        <section class="panel handoff">
+          <div class="panel-header">
+            <h3>Handoff Path</h3>
+            <span>operator visible</span>
+          </div>
+          <div class="handoff-track">
+            <span class="step" style="--tone: var(--researcher)"><i></i>Research</span>
+            <span class="step" style="--tone: var(--browser)"><i></i>Acquire</span>
+            <span class="step" style="--tone: var(--extractor)"><i></i>Extract</span>
+            <span class="step" style="--tone: var(--critic)"><i></i>Review</span>
+            <span class="step" style="--tone: var(--writer)"><i></i>Deliver</span>
+          </div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const agentData = {
+      Researcher: {
+        tone: "var(--researcher)",
+        text: "当前焦点：从目标问题拆出 source frontier，发布 raw document 或候选 source；所有发现都必须经过 Extractor 与 Critic 才能成为正式证据。",
+        a: "03",
+        b: "08",
+        c: "05"
+      },
+      Extractor: {
+        tone: "var(--extractor)",
+        text: "当前焦点：读取 raw_document，产出 cleaned document、evidence chunks 与 quote-backed citation，并把失败交给 Critic 做定向修复。",
+        a: "12",
+        b: "04",
+        c: "17"
+      },
+      Critic: {
+        tone: "var(--critic)",
+        text: "当前焦点：审查证据束、发现 stale source 和冲突事实，写入 board item，要求 Researcher 或 Extractor 补洞。",
+        a: "04",
+        b: "06",
+        c: "03"
+      },
+      Browser: {
+        tone: "var(--browser)",
+        text: "当前焦点：只做受控 source acquisition；观察、提取候选目标、请求授权，不能绕过 evidence 与 delivery 边界。",
+        a: "02",
+        b: "03",
+        c: "06"
+      },
+      Writer: {
+        tone: "var(--writer)",
+        text: "当前焦点：等待 delivery gate 打开，只消费 QA-passed citations；缺证时明确阻断，保留 citations 与 QA export。",
+        a: "01",
+        b: "02",
+        c: "03"
+      },
+      "Shared Store": {
+        tone: "var(--storage)",
+        text: "当前焦点：以 SQLite WAL 和 artifact 文件作为事实源；task lease、mailbox、board、evidence 与 gate 都在这里被审计。",
+        a: "24",
+        b: "31",
+        c: "48"
+      }
+    };
+
+    const rows = document.querySelectorAll(".agent-row");
+    const nodes = document.querySelectorAll(".node");
+    const focusCard = document.querySelector("#focusCard");
+    const focusTitle = document.querySelector("#focusTitle");
+    const focusText = document.querySelector("#focusText");
+    const focusA = document.querySelector("#focusA");
+    const focusB = document.querySelector("#focusB");
+    const focusC = document.querySelector("#focusC");
+
+    function focusAgent(name) {
+      const data = agentData[name] || agentData.Researcher;
+      rows.forEach((row) => row.classList.toggle("active", row.dataset.agent === name));
+      focusCard.style.setProperty("--tone", data.tone);
+      focusTitle.textContent = name;
+      focusText.textContent = data.text;
+      focusA.textContent = data.a;
+      focusB.textContent = data.b;
+      focusC.textContent = data.c;
+
+      if (window.gsap && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        gsap.fromTo(focusCard, { y: 10, autoAlpha: 0.72 }, { y: 0, autoAlpha: 1, duration: 0.36, ease: "power2.out" });
+        gsap.fromTo(".focus-stats span", { y: 8, autoAlpha: 0.5 }, { y: 0, autoAlpha: 1, stagger: 0.05, duration: 0.28, ease: "power2.out" });
+      }
+    }
+
+    rows.forEach((row) => row.addEventListener("click", () => focusAgent(row.dataset.agent)));
+    nodes.forEach((node) => node.addEventListener("click", () => focusAgent(node.dataset.agent)));
+
+    if (window.gsap && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      gsap.defaults({ ease: "power2.out" });
+      gsap.from(".topbar", { y: -16, autoAlpha: 0, duration: 0.55 });
+      gsap.from(".panel, .metric, .map", { y: 18, autoAlpha: 0, duration: 0.55, stagger: 0.035, delay: 0.08 });
+      gsap.from(".node", { scale: 0.88, autoAlpha: 0, duration: 0.58, stagger: { amount: 0.2, from: "center" }, delay: 0.2 });
+      gsap.to(".node:not(.storage)", { y: -5, duration: 2.6, yoyo: true, repeat: -1, stagger: 0.22, ease: "sine.inOut" });
+      gsap.to(".mark", { rotation: 360, duration: 18, repeat: -1, ease: "none" });
+    }
+  </script>
+</body>
+</html>
