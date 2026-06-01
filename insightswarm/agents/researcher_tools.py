@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from insightswarm.agents.agent_loop import AgentLoopState, run_agent_loop
+from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.extraction_batches import create_extraction_batch
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
@@ -19,6 +23,55 @@ from insightswarm.util import new_id
 RESEARCHER_ROLE = "researcher"
 EXTRACTOR_ROLE = "extractor"
 BROWSER_ROLE = "browser_agent"
+
+
+RESEARCH_SUBAGENT_TOOLS = [
+    {
+        "name": "search_web",
+        "description": "Search privately for sources that may answer this scoped subtask. Does not write shared storage.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "source_goal": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+        "output_schema": {"type": "object", "properties": {"candidates": {"type": "array"}}},
+        "side_effects": "private subagent memory only",
+    },
+    {
+        "name": "fetch_source",
+        "description": "Fetch one candidate URL privately and classify whether its text is useful for this subtask.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "why_this_source": {"type": "string"},
+            },
+            "required": ["url"],
+        },
+        "output_schema": {"type": "object", "properties": {"document": {"type": "object"}}},
+        "side_effects": "private subagent memory only",
+    },
+    {
+        "name": "finish_subagent",
+        "description": "Return the private subagent finding to the parent Researcher. Use blocked if no useful path remains.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["complete", "blocked"]},
+                "summary": {"type": "string"},
+                "candidate_urls": {"type": "array", "items": {"type": "string"}},
+                "recommended_next_step": {"type": "string"},
+            },
+            "required": ["status", "summary"],
+        },
+        "output_schema": {"type": "object", "properties": {"finding": {"type": "object"}}},
+        "side_effects": "returns to parent Researcher only",
+    },
+]
 
 
 RESEARCHER_TOOLS = [
@@ -135,6 +188,42 @@ RESEARCHER_TOOLS = [
         "side_effects": "none",
     },
     {
+        "name": "spawn_research_subagents",
+        "description": (
+            "Privately run 1-3 temporary scoped research subagents in parallel when the task is broad, branchy, or a repair needs several source paths checked. "
+            "Subagents have independent context and limited search/fetch tools, cannot write shared storage, cannot create tasks/messages/artifacts, and cannot spawn subagents. "
+            "Use their findings to decide your next Researcher tool call; publish/write/suggest actions remain your responsibility."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "why_parallel_needed": {"type": "string"},
+                "subtasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "search_goal": {"type": "string"},
+                            "constraints": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["question"],
+                    },
+                },
+            },
+            "required": ["why_parallel_needed", "subtasks"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "findings": {"type": "array"},
+                "candidate_sources": {"type": "array"},
+                "recommended_next_steps": {"type": "array"},
+            },
+        },
+        "side_effects": "private Researcher memory only",
+    },
+    {
         "name": "publish_raw_source",
         "description": "Publish one or more fetched usable raw documents to shared storage so Extractor can create citations.",
         "input_schema": {
@@ -246,6 +335,7 @@ class ResearcherToolState:
     candidate_sources: list[dict[str, Any]] = field(default_factory=list)
     fetched_documents: list[dict[str, Any]] = field(default_factory=list)
     acquisition_failures: list[dict[str, Any]] = field(default_factory=list)
+    subagent_findings: list[dict[str, Any]] = field(default_factory=list)
     created_task_ids: list[str] = field(default_factory=list)
     created_message_ids: list[str] = field(default_factory=list)
     created_artifact_ids: list[str] = field(default_factory=list)
@@ -263,6 +353,7 @@ class ResearcherToolHandlers:
         artifact_store: ArtifactStore,
         board_store: BoardStore,
         state: ResearcherToolState,
+        model_client: object | None = None,
     ):
         self.task = task
         self.task_store = task_store
@@ -270,6 +361,7 @@ class ResearcherToolHandlers:
         self.artifact_store = artifact_store
         self.board_store = board_store
         self.state = state
+        self.model_client = model_client
 
     def handlers(self) -> dict[str, Any]:
         return {
@@ -279,6 +371,7 @@ class ResearcherToolHandlers:
             "fetch_source": self.fetch_source,
             "firecrawl_source": self.firecrawl_source,
             "rank_sources": self.rank_sources,
+            "spawn_research_subagents": self.spawn_research_subagents,
             "publish_raw_source": self.publish_raw_source,
             "defer_source": self.defer_source,
             "reject_source": self.reject_source,
@@ -328,6 +421,7 @@ class ResearcherToolHandlers:
             "conflicts": board.get("conflict", []),
             "plans": board.get("plan", []),
             "local_candidates": list(self.state.candidate_sources[-8:]),
+            "subagent_findings": list(self.state.subagent_findings[-6:]),
             "acquisition_pressure": _acquisition_pressure(self.state, self.task),
         }
 
@@ -445,6 +539,46 @@ class ResearcherToolHandlers:
                 )
         ranked = sorted((_rank_source(source, goal) for source in sources), key=lambda item: item["score"], reverse=True)
         return {"ok": True, "ranked_sources": ranked[:12], "acquisition_pressure": _acquisition_pressure(self.state, self.task)}
+
+    def spawn_research_subagents(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        if self.state.task_context is None:
+            return {"ok": False, "error": "read_task first"}
+        raw_subtasks = list(tool_input.get("subtasks") or [])
+        subtasks = [_normalize_subagent_task(item, index=index) for index, item in enumerate(raw_subtasks) if isinstance(item, dict)]
+        subtasks = [item for item in subtasks if item["question"]][:3]
+        if not subtasks:
+            return {"ok": False, "error": "spawn_research_subagents requires 1-3 subtasks with question"}
+
+        findings: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(3, len(subtasks))) as executor:
+            futures = [
+                executor.submit(
+                    _run_research_subagent,
+                    parent_task=self.task,
+                    subtask=subtask,
+                    model_client=self.model_client,
+                )
+                for subtask in subtasks
+            ]
+            for future in as_completed(futures):
+                findings.append(future.result())
+
+        findings.sort(key=lambda item: int(item.get("index") or 0))
+        self.state.subagent_findings.extend(findings)
+        candidate_sources = [
+            _candidate_summary({"url": url, "title": "", "snippet": finding.get("summary", "")})
+            for finding in findings
+            for url in list(finding.get("candidate_urls") or [])[:5]
+        ]
+        self.state.candidate_sources.extend(candidate_sources)
+        return {
+            "ok": True,
+            "why_parallel_needed": _safe_text(tool_input.get("why_parallel_needed")),
+            "findings": findings,
+            "candidate_sources": candidate_sources[:12],
+            "recommended_next_steps": [_safe_text(item.get("recommended_next_step")) for item in findings if _safe_text(item.get("recommended_next_step"))],
+            "shared_storage_written": False,
+        }
 
     def publish_raw_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         if self.state.task_context is None:
@@ -567,8 +701,8 @@ class ResearcherToolHandlers:
                 self.task.run_id,
                 from_role=RESEARCHER_ROLE,
                 to_role=BROWSER_ROLE,
-                message_type="suggestion",
-                payload={"kind": "browser_already_requested", "task_id": existing_browser_task.task_id, "issue_key": issue_key, "goal": goal, "target_url": target_url},
+                message_type="observation",
+                payload={"kind": "progress_update", "status": "browser_already_requested", "task_id": existing_browser_task.task_id, "issue_key": issue_key, "goal": goal, "target_url": target_url},
                 related_task_id=existing_browser_task.task_id,
             )
             self.state.created_message_ids.append(message.message_id or "")
@@ -692,6 +826,173 @@ class ResearcherToolHandlers:
             if target_url and task_target_url == target_url:
                 return task
         return None
+
+
+@dataclass
+class _ResearchSubagentState:
+    subtask: dict[str, Any]
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    fetched_documents: list[dict[str, Any]] = field(default_factory=list)
+    finding: dict[str, Any] | None = None
+
+
+class _ResearchSubagentHandlers:
+    def __init__(self, *, parent_task: Task, state: _ResearchSubagentState):
+        self.parent_task = parent_task
+        self.state = state
+
+    def handlers(self) -> dict[str, Any]:
+        return {
+            "search_web": self.search_web,
+            "fetch_source": self.fetch_source,
+            "finish_subagent": self.finish_subagent,
+        }
+
+    def search_web(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        query = _safe_text(tool_input.get("query")) or _safe_text(self.state.subtask.get("question"))
+        limit = min(max(int(tool_input.get("limit") or 5), 1), 6)
+        result = SearchTool().run({"query": query, "limit": limit}, ToolContext(run_id=self.parent_task.run_id, task_id=self.parent_task.task_id))
+        raw_results = list(result.data.get("results") or []) if result.ok else []
+        candidates = [_candidate_summary(item) for item in raw_results]
+        self.state.candidates.extend(candidates)
+        return {"ok": result.ok, "query": query, "source_goal": tool_input.get("source_goal"), "candidates": candidates, "diagnostics": result.diagnostics, "error": result.error}
+
+    def fetch_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        url = _safe_text(tool_input.get("url"))
+        if not url:
+            return {"ok": False, "error": "fetch_source requires url"}
+        result = FetchUrlTool().run({"url": url}, ToolContext(run_id=self.parent_task.run_id, task_id=self.parent_task.task_id))
+        if not result.ok:
+            document = {"url": url, "usable": False, "usability_reason": result.error or "fetch_failed"}
+            self.state.fetched_documents.append(document)
+            return {"ok": False, "error": result.error, "document": document}
+        document = dict(result.data)
+        page_profile = _classify_page(document, url)
+        visible_document = {
+            "url": url,
+            "title": _safe_text(document.get("title")),
+            "usable": bool(page_profile["likely_extractable"]),
+            "usability_reason": page_profile["reason"],
+            "page_type": page_profile["page_type"],
+            "information_density": page_profile["estimated_information_density"],
+            "text_preview": _safe_text(document.get("text"))[:700],
+        }
+        self.state.fetched_documents.append({**document, **visible_document, "page_profile": page_profile})
+        return {"ok": True, "document": visible_document}
+
+    def finish_subagent(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        status = _safe_text(tool_input.get("status")) or "blocked"
+        if status not in {"complete", "blocked"}:
+            status = "blocked"
+        candidate_urls = [_safe_text(url) for url in list(tool_input.get("candidate_urls") or []) if _safe_text(url)]
+        if not candidate_urls:
+            candidate_urls = [_safe_text(item.get("url")) for item in self.state.candidates if _safe_text(item.get("url"))][:5]
+        finding = {
+            "status": status,
+            "question": _safe_text(self.state.subtask.get("question")),
+            "summary": _safe_text(tool_input.get("summary")) or _fallback_subagent_summary(self.state),
+            "candidate_urls": candidate_urls[:8],
+            "recommended_next_step": _safe_text(tool_input.get("recommended_next_step")),
+            "searched_candidates": list(self.state.candidates[-8:]),
+            "fetched_documents": [_subagent_document_summary(document) for document in self.state.fetched_documents[-4:]],
+        }
+        self.state.finding = finding
+        return {"ok": True, "terminal": True, "status": status, "finding": finding}
+
+
+def _run_research_subagent(*, parent_task: Task, subtask: dict[str, Any], model_client: object | None) -> dict[str, Any]:
+    state = _ResearchSubagentState(subtask=subtask)
+    if model_client is None:
+        return _run_fallback_subagent(parent_task=parent_task, state=state)
+
+    loop_state = AgentLoopState()
+    executor = ToolExecutor(RESEARCH_SUBAGENT_TOOLS, _ResearchSubagentHandlers(parent_task=parent_task, state=state).handlers())
+    trace, final_state = run_agent_loop(
+        model_client=model_client,
+        system_prompt=_research_subagent_prompt(),
+        tool_specs=RESEARCH_SUBAGENT_TOOLS,
+        executor=executor,
+        initial_user_payload={
+            "subtask": subtask,
+            "parent_task": {
+                "task_id": parent_task.task_id,
+                "run_id": parent_task.run_id,
+                "kind": parent_task.kind,
+            },
+            "instruction": "Explore this subtask privately. Return useful source leads and a concise finding. Do not write shared storage.",
+        },
+        state=loop_state,
+        safety_cap=8,
+        metadata_role="research_subagent_loop",
+    )
+    finding = state.finding or _fallback_subagent_finding(state=state, terminal_reason=final_state.terminal_reason)
+    finding["rounds"] = len(trace)
+    finding["index"] = int(subtask.get("index") or 0)
+    return finding
+
+
+def _run_fallback_subagent(*, parent_task: Task, state: _ResearchSubagentState) -> dict[str, Any]:
+    query = _safe_text(state.subtask.get("question"))
+    result = SearchTool().run({"query": query, "limit": 5}, ToolContext(run_id=parent_task.run_id, task_id=parent_task.task_id))
+    raw_results = list(result.data.get("results") or []) if result.ok else []
+    state.candidates.extend(_candidate_summary(item) for item in raw_results)
+    best = state.candidates[0] if state.candidates else {}
+    url = _safe_text(best.get("url"))
+    if url:
+        fetch_result = FetchUrlTool().run({"url": url}, ToolContext(run_id=parent_task.run_id, task_id=parent_task.task_id))
+        if fetch_result.ok:
+            document = dict(fetch_result.data)
+            profile = _classify_page(document, url)
+            state.fetched_documents.append({**document, "usable": bool(profile["likely_extractable"]), "page_profile": profile})
+    return _fallback_subagent_finding(state=state, terminal_reason=result.error)
+
+
+def _fallback_subagent_finding(*, state: _ResearchSubagentState, terminal_reason: str | None = None) -> dict[str, Any]:
+    candidate_urls = [_safe_text(item.get("url")) for item in state.candidates if _safe_text(item.get("url"))][:8]
+    usable_docs = [document for document in state.fetched_documents if bool(document.get("usable"))]
+    status = "complete" if candidate_urls or usable_docs else "blocked"
+    return {
+        "status": status,
+        "question": _safe_text(state.subtask.get("question")),
+        "summary": _fallback_subagent_summary(state) if status == "complete" else (_safe_text(terminal_reason) or "No useful private source path found."),
+        "candidate_urls": candidate_urls,
+        "recommended_next_step": "Researcher should rank these candidates, fetch the best source, then publish only usable raw documents." if candidate_urls else "",
+        "searched_candidates": list(state.candidates[-8:]),
+        "fetched_documents": [_subagent_document_summary(document) for document in state.fetched_documents[-4:]],
+        "index": int(state.subtask.get("index") or 0),
+    }
+
+
+def _fallback_subagent_summary(state: _ResearchSubagentState) -> str:
+    if state.fetched_documents:
+        doc = state.fetched_documents[-1]
+        return f"Private subagent fetched {_document_url(doc)}; usable={bool(doc.get('usable'))}; title={_safe_text(doc.get('title'))}."
+    if state.candidates:
+        return f"Private subagent found {len(state.candidates)} candidate source(s); top source: {_safe_text(state.candidates[0].get('url'))}."
+    return "Private subagent did not find useful source candidates."
+
+
+def _subagent_document_summary(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "url": _document_url(document),
+        "title": _safe_text(document.get("title")),
+        "usable": bool(document.get("usable")),
+        "page_type": _safe_text(document.get("page_type") or dict(document.get("page_profile") or {}).get("page_type")),
+        "information_density": _safe_text(document.get("information_density") or dict(document.get("page_profile") or {}).get("estimated_information_density")),
+    }
+
+
+def _normalize_subagent_task(item: dict[str, Any], *, index: int) -> dict[str, Any]:
+    return {
+        "index": index,
+        "question": _safe_text(item.get("question")),
+        "search_goal": _safe_text(item.get("search_goal")),
+        "constraints": [_safe_text(value) for value in list(item.get("constraints") or []) if _safe_text(value)][:5],
+    }
+
+
+def _research_subagent_prompt() -> str:
+    return (Path(__file__).resolve().parent.parent / "prompts" / "research_subagent.md").read_text(encoding="utf-8")
 
 
 def _task_question(task: Task) -> str:

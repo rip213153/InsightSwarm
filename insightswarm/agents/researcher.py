@@ -166,6 +166,7 @@ class Researcher:
             artifact_store=self.artifact_store,
             board_store=self.board_store,
             state=tool_state,
+            model_client=model_client,
         )
         executor = ToolExecutor(RESEARCHER_TOOLS, handlers.handlers())
         return run_agent_loop(

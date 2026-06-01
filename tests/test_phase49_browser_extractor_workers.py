@@ -192,6 +192,54 @@ def test_browser_execute_code_allows_cookie_banner_helper(tmp_path: Path) -> Non
     assert result["result"]["reason"] == "no cookie/privacy overlay control found"
 
 
+def test_browser_execute_code_blocks_third_identical_snippet(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Browser repeat guard",
+        budget={"max_steps": 12},
+        phase="research",
+    )
+    task = task_store.create(
+        run_state.run_id,
+        kind="hard_acquisition",
+        status="leased",
+        owner_role="browser_agent",
+        inputs={"goal": "Read fake browser text", "target_url": "https://example.com/pricing", "browser_backend": "fake"},
+        created_by="test",
+    )
+    handlers = BrowserAgentToolHandlers(
+        task=task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=BoardStore(store),
+        state=BrowserAgentToolState(),
+    )
+
+    handlers.read_task({})
+    for _ in range(2):
+        result = handlers.execute_browser_code(
+            {
+                "code": "visible_text(max_chars=200)",
+                "why_this_code": "Try reading the same visible text.",
+            }
+        )
+        assert result["ok"] is True
+
+    blocked = handlers.execute_browser_code(
+        {
+            "code": "visible_text(max_chars=200)",
+            "why_this_code": "This third identical call should be blocked.",
+        }
+    )
+
+    assert blocked["ok"] is False
+    assert "repeated_browser_code_blocked" in blocked["error"]
+
+
 def test_browser_authorization_allows_retrying_high_risk_navigation(tmp_path: Path) -> None:
     store = _build_store(tmp_path)
     task_store = TaskStore(store)
@@ -369,6 +417,23 @@ def test_extractor_can_request_browser_acquisition_for_dynamic_low_signal_source
     assert len(browser_messages) == 1
     assert browser_tasks[0].inputs["target_url"] == "https://www.cartier.com/en-fr/watchesandwonders#/"
     assert browser_tasks[0].created_by == "extractor"
+
+    deduped = handlers.request_browser_acquisition(
+        {
+            "goal": "Use a visible browser to observe Cartier page modules, overlays, scrolling, and interactive entry points.",
+            "target_url": "https://www.cartier.com/en-fr/watchesandwonders#/",
+            "why_browser_needed": "A BrowserAgent task already exists for this dynamic source.",
+        }
+    )
+    browser_tasks_after_dedupe = [
+        item
+        for item in store.list_swarm_tasks(run_state.run_id)
+        if item.kind == "hard_acquisition" and item.owner_role == "browser_agent"
+    ]
+
+    assert deduped["ok"] is True
+    assert deduped["deduped"] is True
+    assert len(browser_tasks_after_dedupe) == 1
 
 
 def test_browser_and_extractor_run_forever_consume_pipeline_and_exit(tmp_path: Path) -> None:

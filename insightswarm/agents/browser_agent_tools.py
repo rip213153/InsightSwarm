@@ -125,6 +125,8 @@ class BrowserAgentToolState:
     created_artifact_ids: list[str] = field(default_factory=list)
     terminal_status: str | None = None
     terminal_reason: str | None = None
+    browser_code_counts: dict[str, int] = field(default_factory=dict)
+    browser_timeout_counts: dict[str, int] = field(default_factory=dict)
 
 
 class HumanAuthorizationRequired(RuntimeError):
@@ -206,16 +208,21 @@ class BrowserAgentToolHandlers:
         blocked = _validate_code(code)
         if blocked:
             return {"ok": False, "error": blocked}
+        repeat_block = self._repeat_block_for_code(code)
+        if repeat_block:
+            return repeat_block
 
         namespace = self._namespace()
         stdout = io.StringIO()
         result: Any = None
+        action_key = _browser_action_key(code)
         try:
             with contextlib.redirect_stdout(stdout):
                 result = _execute_code_with_result(code, _safe_globals(), namespace)
         except HumanAuthorizationRequired as exc:
             self._request_authorization(str(exc))
         except Exception as exc:
+            self._record_browser_code_failure(action_key, exc)
             return {
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
@@ -223,6 +230,7 @@ class BrowserAgentToolHandlers:
                 "browser_state": self._browser_state_summary(),
             }
         finally:
+            self._record_browser_code_attempt(code)
             self.state.namespace = {
                 key: value
                 for key, value in namespace.items()
@@ -242,6 +250,37 @@ class BrowserAgentToolHandlers:
             "status": self.state.terminal_status,
             "reason": self.state.terminal_reason,
         }
+
+    def _repeat_block_for_code(self, code: str) -> dict[str, Any] | None:
+        code_key = _normalize_code_for_repeat(code)
+        action_key = _browser_action_key(code)
+        if self.state.browser_code_counts.get(code_key, 0) >= 2:
+            return {
+                "ok": False,
+                "error": "repeated_browser_code_blocked: same browser code has already been attempted twice",
+                "repeat_key": code_key,
+                "required_next_strategy": "publish_raw_source, finish_browser(blocked), or choose a materially different browser strategy",
+                "browser_state": self._browser_state_summary(),
+            }
+        if self.state.browser_timeout_counts.get(action_key, 0) >= 2:
+            return {
+                "ok": False,
+                "error": "repeated_browser_timeout_blocked: this browser action family has already timed out twice",
+                "repeat_key": action_key,
+                "required_next_strategy": "use a lighter read, publish the best available visible text, or finish_browser(blocked)",
+                "browser_state": self._browser_state_summary(),
+            }
+        return None
+
+    def _record_browser_code_attempt(self, code: str) -> None:
+        code_key = _normalize_code_for_repeat(code)
+        self.state.browser_code_counts[code_key] = self.state.browser_code_counts.get(code_key, 0) + 1
+
+    def _record_browser_code_failure(self, action_key: str, exc: Exception) -> None:
+        error_text = f"{type(exc).__name__}: {exc}".lower()
+        if "timeout" not in error_text:
+            return
+        self.state.browser_timeout_counts[action_key] = self.state.browser_timeout_counts.get(action_key, 0) + 1
 
     def _namespace(self) -> dict[str, Any]:
         namespace = dict(self.state.namespace)
@@ -687,6 +726,37 @@ def _validate_code(code: str) -> str | None:
         if marker in lowered:
             return f"blocked browser capability in code: {marker}"
     return None
+
+
+def _normalize_code_for_repeat(code: str) -> str:
+    return " ".join(_safe_text(code).split())
+
+
+def _browser_action_key(code: str) -> str:
+    allowed = {
+        "open_url",
+        "page_state",
+        "visible_text",
+        "assess_page",
+        "click_link",
+        "dismiss_cookie_banner",
+        "collect_visible_text",
+        "scroll",
+        "wait",
+        "publish_raw_source",
+        "request_authorization",
+        "request_login_authorization",
+        "finish_browser",
+    }
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return "invalid"
+    calls: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in allowed:
+            calls.append(node.func.id)
+    return "+".join(calls) if calls else "execute_browser_code"
 
 
 def _execute_code_with_result(code: str, globals_dict: dict[str, Any], namespace: dict[str, Any]) -> Any:

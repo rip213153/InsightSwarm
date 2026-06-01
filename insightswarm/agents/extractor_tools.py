@@ -412,9 +412,10 @@ class ExtractorToolHandlers:
                 self.task.run_id,
                 from_role=EXTRACTOR_ROLE,
                 to_role=BROWSER_ROLE,
-                message_type="suggestion",
+                message_type="observation",
                 payload={
-                    "kind": "browser_already_requested",
+                    "kind": "progress_update",
+                    "status": "browser_already_requested",
                     "task_id": existing.task_id,
                     "issue_key": issue_key,
                     "goal": goal,

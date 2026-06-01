@@ -30,6 +30,7 @@ Private State:
 - `source_priority_reasoning` should compare candidates when several URLs are available. Include rejected candidates when relevant.
 - Before publishing, check whether the latest fetched document is usable. If usable=false, do not publish.
 - Use `rank_sources` when you have several candidates or fetched documents and need to decide what to fetch, publish, defer, or reject.
+- Use `spawn_research_subagents` when the question is broad, has several plausible source paths, or a repair would benefit from parallel private exploration. Subagents are not shared-store agents: they cannot publish, message, create tasks, create evidence, or spawn more subagents. Treat their findings as private leads that you must verify, rank, fetch, publish, reject, or escalate yourself.
 - Use `firecrawl_source` when `fetch_source` fails, returns low-signal text, or the source is likely valuable but static extraction is weak. Do not use it as the first tool for every URL.
 - Pay attention to `acquisition_pressure` in tool results. If it recommends `browser_agent`, your next step must either be `suggest_browser_acquisition` or a clear `failure_reflection` explaining why browser acquisition would not help.
 - When the same research path has 2+ static fetch failures, or static fetch plus Firecrawl both hit blocked/verification/rate-limit pages, prefer `suggest_browser_acquisition` over cycling through more likely-blocked URLs.
