@@ -35,7 +35,7 @@ def test_phase49_shared_objects_round_trip(tmp_path: Path) -> None:
     message = store.create_swarm_message(
         run_state.run_id,
         from_role="lead",
-        to_role="sub_researcher",
+        to_role="researcher",
         message_type="request",
         payload={"kind": "research_subquestion", "task_id": lead_task.task_id},
         related_task_id=lead_task.task_id,
@@ -68,7 +68,7 @@ def test_phase49_shared_objects_round_trip(tmp_path: Path) -> None:
     assert updated_state.delivery_gate is True
 
     tasks = store.list_swarm_tasks(run_state.run_id, owner_role="lead")
-    messages = store.list_swarm_messages(run_state.run_id, to_role="sub_researcher")
+    messages = store.list_swarm_messages(run_state.run_id, to_role="researcher")
     artifacts = store.list_swarm_artifacts(run_state.run_id, source_task_id=lead_task.task_id)
     evidence_rows = store.list_swarm_evidence(run_state.run_id, artifact_id=artifact.artifact_id)
 

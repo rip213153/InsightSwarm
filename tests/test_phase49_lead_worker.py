@@ -39,13 +39,13 @@ def test_lead_worker_creates_only_tasks_and_messages(tmp_path: Path) -> None:
     result = LeadWorker(task_store, mailbox).run_once(run_state.run_id)
 
     downstream_tasks = store.list_swarm_tasks(run_state.run_id)
-    sub_researcher_tasks = [
-        task for task in downstream_tasks if task.owner_role == "sub_researcher"
+    researcher_tasks = [
+        task for task in downstream_tasks if task.owner_role == "researcher"
     ]
     browser_tasks = [
         task for task in downstream_tasks if task.owner_role == "browser_agent"
     ]
-    lead_messages = mailbox.inbox(run_state.run_id, role="sub_researcher")
+    lead_messages = mailbox.inbox(run_state.run_id, role="researcher")
     browser_messages = mailbox.inbox(run_state.run_id, role="browser_agent")
     broadcasts = mailbox.broadcasts(run_state.run_id)
     completed_root = store.get_swarm_task(root_task.task_id)
@@ -53,9 +53,9 @@ def test_lead_worker_creates_only_tasks_and_messages(tmp_path: Path) -> None:
     assert result is not None
     assert result.claimed_task_id == root_task.task_id
     assert len(result.created_task_ids) == 3
-    assert len(sub_researcher_tasks) == 2
+    assert len(researcher_tasks) == 2
     assert len(browser_tasks) == 1
-    assert all(task.created_by == "lead" for task in sub_researcher_tasks + browser_tasks)
+    assert all(task.created_by == "lead" for task in researcher_tasks + browser_tasks)
     assert completed_root.status == "done"
     assert len([message for message in lead_messages if message.type == "request" and message.payload.get("kind") == "research_subquestion"]) == 2
     assert len([message for message in browser_messages if message.type == "request" and message.payload.get("kind") == "hard_acquisition"]) == 1
@@ -77,7 +77,7 @@ def test_lead_worker_turns_repair_request_into_followup_work_order(tmp_path: Pat
         kind="repair_request",
         status="pending",
         owner_role="lead",
-        inputs={"targeted_query": "补充 DeepSeek 海外证据", "owner_role": "sub_researcher"},
+        inputs={"targeted_query": "补充 DeepSeek 海外证据", "owner_role": "researcher"},
         priority=8,
         created_by="critic",
     )
@@ -87,7 +87,7 @@ def test_lead_worker_turns_repair_request_into_followup_work_order(tmp_path: Pat
     downstream_tasks = [
         task for task in store.list_swarm_tasks(run_state.run_id) if task.task_id != repair_task.task_id
     ]
-    repair_messages = mailbox.inbox(run_state.run_id, role="sub_researcher")
+    repair_messages = mailbox.inbox(run_state.run_id, role="researcher")
 
     assert result is not None
     assert result.claimed_task_id == repair_task.task_id
@@ -121,7 +121,7 @@ def test_lead_worker_runs_until_idle_across_multiple_lead_tasks(tmp_path: Path) 
         kind="repair_request",
         status="pending",
         owner_role="lead",
-        inputs={"targeted_query": "repair follow-up", "owner_role": "sub_researcher"},
+        inputs={"targeted_query": "repair follow-up", "owner_role": "researcher"},
         priority=9,
         created_by="critic",
     )
@@ -171,7 +171,7 @@ def test_lead_worker_run_forever_consumes_tasks_and_exits_on_stop_event(tmp_path
 
     deadline = time.time() + 5.0
     while time.time() < deadline:
-        if any(task.owner_role == "sub_researcher" for task in store.list_swarm_tasks(run_state.run_id)):
+        if any(task.owner_role == "researcher" for task in store.list_swarm_tasks(run_state.run_id)):
             break
         time.sleep(0.01)
 

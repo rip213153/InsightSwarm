@@ -17,12 +17,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["insightswarm*"]
-exclude = ["browser_extension*"]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["--ignore=tests/acceptance"]
 pythonpath = ["."]
 markers = [
+  "acceptance: opt-in real/model-backed acceptance tests",
   "browser_smoke: opt-in local Playwright/browser smoke tests",
   "cdp_smoke: opt-in real CDP read-only browser observation smoke tests",
   "cdp_interaction_smoke: opt-in real CDP browser interaction smoke tests",

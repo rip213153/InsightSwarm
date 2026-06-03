@@ -33,6 +33,6 @@ def test_objective_runtime_does_not_directly_call_browser_or_extractor() -> None
     assert "LeadWorker(task_store, mailbox).run_until_idle(" not in text
     assert re.search(r"BrowserWorker\([^\)]*\)\.run_once\(", text) is None
     assert re.search(r"ExtractorWorker\([^\)]*\)\.run_once\(", text) is None
-    assert "run_sub_researchers(" not in text
+    assert "run_researchers(" not in text
     assert "review_evidence(" not in text
     assert re.search(r"WriterWorker\([^\)]*\)\.run_once\(", text) is None

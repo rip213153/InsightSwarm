@@ -22,6 +22,48 @@ def _build_store(tmp_path: Path) -> Store:
     return Store(db_path, artifact_dir)
 
 
+class _ExtractorCitationModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages, response_format=None, max_tokens=None, temperature=None, metadata=None):
+        del messages, response_format, max_tokens, temperature, metadata
+        self.calls += 1
+        if self.calls == 1:
+            payload = {
+                "private_state": {"plan": "Read the raw browser document."},
+                "tool_call": {"name": "read_raw_document", "input": {}},
+            }
+        elif self.calls == 2:
+            quote = "Raw browser capture for: Open public DeepSeek news page."
+            payload = {
+                "private_state": {"plan": "Create one quote-backed citation from the raw browser text."},
+                "tool_call": {
+                    "name": "propose_citations",
+                    "input": {
+                        "candidates": [
+                            {
+                                "claim": "BrowserAgent acquired public visible text for the requested DeepSeek browser source.",
+                                "quote": quote,
+                                "confidence": 0.8,
+                                "rationale": "The quote is exact text from the fallback raw browser document.",
+                            }
+                        ],
+                        "why_these_quotes": "The test only needs one quote-backed citation to verify the shared-store pipeline.",
+                    },
+                },
+            }
+        else:
+            payload = {
+                "private_state": {"plan": "Finish extraction after citation creation."},
+                "tool_call": {
+                    "name": "finish_extraction",
+                    "input": {"status": "complete", "reason": "citation created"},
+                },
+            }
+        return type("ModelResult", (), {"status": "ok", "json_data": payload, "text": ""})()
+
+
 def test_lead_browser_extractor_pipeline_uses_tasks_messages_and_artifacts(tmp_path: Path) -> None:
     store = _build_store(tmp_path)
     task_store = TaskStore(store)
@@ -61,7 +103,10 @@ def test_lead_browser_extractor_pipeline_uses_tasks_messages_and_artifacts(tmp_p
     assert len(extractor_tasks) == 1
     assert len(extractor_messages) == 1
 
-    extractor_result = ExtractorWorker(task_store, mailbox, artifact_store).run_once(run_state.run_id)
+    extractor_result = ExtractorWorker(task_store, mailbox, artifact_store).run_once(
+        run_state.run_id,
+        model_client=_ExtractorCitationModel(),
+    )
     citation_artifacts = [
         artifact for artifact in store.list_swarm_artifacts(run_state.run_id) if artifact.type == "citation"
     ]
@@ -473,6 +518,7 @@ def test_browser_and_extractor_run_forever_consume_pipeline_and_exit(tmp_path: P
             run_state.run_id,
             stop_event,
             poll_interval=0.01,
+            model_client=_ExtractorCitationModel(),
         )
 
     browser_thread = threading.Thread(target=_browser_loop, daemon=True)
