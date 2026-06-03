@@ -106,6 +106,31 @@ BROWSER_AGENT_TOOLS = [
         },
         "side_effects": "may navigate/read browser, write raw_document artifacts, create extractor tasks, or request authorization",
     },
+    {
+        "name": "inspect_visual_page",
+        "description": (
+            "Escalate to the configured multimodal model for a screenshot-only observation when DOM/CDP text is insufficient. "
+            "Use only after page_state/visible_text are empty, misleading, blocked by a visual overlay, canvas/image-heavy, "
+            "or repeated safe DOM interactions failed. This produces a visual observation, not formal evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "why_vision_needed": {"type": "string"},
+                "question": {"type": "string"},
+            },
+            "required": ["why_vision_needed"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "visual_observation": {"type": "object"},
+                "browser_state": {"type": "object"},
+            },
+        },
+        "side_effects": "captures a screenshot and asks the vision model for a bounded observation; does not create evidence",
+    },
 ]
 
 
@@ -143,6 +168,7 @@ class BrowserAgentToolHandlers:
         artifact_store: ArtifactStore,
         board_store: BoardStore,
         state: BrowserAgentToolState,
+        model_client: object | None = None,
     ):
         self.task = task
         self.task_store = task_store
@@ -150,11 +176,13 @@ class BrowserAgentToolHandlers:
         self.artifact_store = artifact_store
         self.board_store = board_store
         self.state = state
+        self.model_client = model_client
 
     def handlers(self) -> dict[str, Any]:
         return {
             "read_task": self.read_task,
             "execute_browser_code": self.execute_browser_code,
+            "inspect_visual_page": self.inspect_visual_page,
         }
 
     def read_task(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +195,7 @@ class BrowserAgentToolHandlers:
             "goal": goal,
             "target_url": target_url,
             "reason": _safe_text(self.task.inputs.get("reason")),
+            "user_inputs": list(self.task.inputs.get("user_inputs") or []),
             "constraints": [
                 "Only acquire public information relevant to the hard acquisition goal.",
                 "Do not type, upload, download, access cookies/storage/headers/tokens/passwords, submit forms, or run arbitrary JavaScript.",
@@ -195,9 +224,78 @@ class BrowserAgentToolHandlers:
                 "request_login_authorization(login_url=None, reason='')",
                 "finish_browser(status='complete'|'blocked', reason='...')",
             ],
+            "vision_escalation": {
+                "available": bool(self.model_client and hasattr(self.model_client, "analyze_image")),
+                "tool": "inspect_visual_page",
+                "use_when": [
+                    "DOM/page_state is empty but the visible page appears to contain relevant information.",
+                    "The content is canvas, image text, scanned PDF, WebGL, or otherwise visual-first.",
+                    "A modal/cookie/region overlay is visually blocking the page but cannot be found in DOM.",
+                    "Repeated safe DOM operations fail or contradict visible page state.",
+                ],
+                "not_formal_evidence": True,
+            },
         }
         self.state.task_context = context
         return {"ok": True, **context}
+
+    def inspect_visual_page(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        if self.state.task_context is None:
+            return {"ok": False, "error": "read_task first"}
+        if self.model_client is None or not hasattr(self.model_client, "analyze_image"):
+            return {"ok": False, "error": "vision model client is not available"}
+        reason = _safe_text(tool_input.get("why_vision_needed"))
+        if not reason:
+            return {"ok": False, "error": "why_vision_needed is required"}
+        session = self._session()
+        observation = session.observe("screenshot", {"include_data_url": True, "include_base64": True})
+        screenshot = dict(observation.observation or {})
+        data_url = _safe_text(screenshot.get("screenshot_data_url"))
+        if not data_url:
+            return {"ok": False, "error": "screenshot capture produced no image", "browser_state": self._browser_state_summary()}
+        question = _safe_text(tool_input.get("question")) or _goal(self.task)
+        prompt = (
+            "You are a visual browser observer for BrowserAgent. "
+            "Describe only what is visible in the screenshot and how it affects the acquisition task. "
+            "Do not create formal evidence or cite sources. Return JSON with keys: "
+            "page_summary, visible_text, blocking_overlay, suggested_dom_next_step, confidence, uncertainty. "
+            f"Task goal: {question}. Vision escalation reason: {reason}."
+        )
+        try:
+            result = self.model_client.analyze_image(
+                [{"role": "user", "content": prompt}],
+                [{"data_url": data_url, "mime_type": "image/png"}],
+                response_format={"type": "json_object"},
+                metadata={"role": BROWSER_ROLE, "task_id": self.task.task_id, "tool": "inspect_visual_page"},
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "browser_state": self._browser_state_summary(),
+            }
+        if getattr(result, "status", "") != "ok":
+            return {
+                "ok": False,
+                "error": getattr(result, "error", None) or "vision model failed",
+                "browser_state": self._browser_state_summary(),
+            }
+        visual_observation = getattr(result, "json_data", None) or {"text": getattr(result, "text", "")}
+        self._record_trace(
+            "inspect_visual_page",
+            {
+                "reason": reason,
+                "screenshot_bytes": screenshot.get("screenshot_bytes"),
+                "model": getattr(result, "model", None),
+                "confidence": visual_observation.get("confidence") if isinstance(visual_observation, dict) else None,
+            },
+        )
+        return {
+            "ok": True,
+            "visual_observation": visual_observation,
+            "browser_state": self._browser_state_summary(),
+            "not_formal_evidence": True,
+        }
 
     def execute_browser_code(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         if self.state.task_context is None:
@@ -234,7 +332,7 @@ class BrowserAgentToolHandlers:
             self.state.namespace = {
                 key: value
                 for key, value in namespace.items()
-                if not key.startswith("_") and key not in {"open_url", "page_state", "visible_text", "assess_page", "click_link", "dismiss_cookie_banner", "collect_visible_text", "scroll", "wait", "publish_raw_source", "request_authorization", "request_login_authorization", "finish_browser"}
+                if not key.startswith("_") and key not in {"open_url", "page_state", "visible_text", "evaluate", "assess_page", "click_link", "dismiss_cookie_banner", "collect_visible_text", "scroll", "wait", "publish_raw_source", "request_authorization", "request_login_authorization", "finish_browser"}
             }
 
         return {
@@ -291,6 +389,7 @@ class BrowserAgentToolHandlers:
                 "open_url": self._open_url,
                 "page_state": self._page_state,
                 "visible_text": self._visible_text,
+                "evaluate": self._evaluate_js,
                 "assess_page": self._assess_page,
                 "click_link": self._click_link,
                 "dismiss_cookie_banner": self._dismiss_cookie_banner,
@@ -355,6 +454,15 @@ class BrowserAgentToolHandlers:
         self.state.last_visible_text = text
         self._record_trace("visible_text", {"chars": len(text), "url": self.state.current_url})
         return text[: max(200, min(int(max_chars or 6000), 12000))]
+
+    def _evaluate_js(self, expression: str) -> Any:
+        expression = _safe_text(expression)
+        blocked = _validate_read_only_js(expression)
+        if blocked:
+            raise ValueError(blocked)
+        result = self._session().evaluate_js(expression)
+        self._record_trace("evaluate", {"expression_chars": len(expression), "result_type": type(result).__name__})
+        return _json_safe_result(result)
 
     def _assess_page(self, goal: str | None = None) -> dict[str, Any]:
         if not self.state.last_page_state:
@@ -737,6 +845,7 @@ def _browser_action_key(code: str) -> str:
         "open_url",
         "page_state",
         "visible_text",
+        "evaluate",
         "assess_page",
         "click_link",
         "dismiss_cookie_banner",
@@ -1002,6 +1111,35 @@ def _raise_if_high_risk(text: str) -> None:
     marker = _high_risk_marker(text)
     if marker:
         raise HumanAuthorizationRequired(f"High-risk browser action requires approval: {marker}")
+
+
+def _validate_read_only_js(expression: str) -> str | None:
+    if not expression:
+        return "evaluate requires a JavaScript expression"
+    if len(expression) > 5000:
+        return "evaluate expression is too long"
+    lowered = expression.lower()
+    blocked_tokens = {
+        "document.cookie",
+        "localstorage",
+        "sessionstorage",
+        "indexeddb",
+        "xmlhttprequest",
+        "fetch(",
+        "navigator.credentials",
+        "authorization",
+        "password",
+        "token",
+        ".click(",
+        ".submit(",
+        "eval(",
+        "=> fetch",
+        "new function",
+    }
+    for token in blocked_tokens:
+        if token in lowered:
+            return f"evaluate blocked for non-read-only token: {token}"
+    return None
 
 
 def _login_allowed_for_url(url: str, task: Task) -> bool:

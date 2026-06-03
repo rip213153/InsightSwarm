@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_ask.add_argument("--search-provider", default="tavily")
     run_ask.add_argument("--browser-backend", default=None)
     run_ask.add_argument("--browser-cdp-url", default=None)
+    run_ask.add_argument("--input-file", action="append", default=[], help="Attach an image, audio, or other local file as user-provided run context.")
     run_ask.add_argument("--json", action="store_true")
 
     run_smoke = run_sub.add_parser("smoke")
@@ -78,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                 search_provider=args.search_provider,
                 browser_backend=args.browser_backend,
                 browser_cdp_url=args.browser_cdp_url,
+                input_files=args.input_file,
             )
         except HumanAuthorizationRequired as exc:
             print(f"HumanAuthorizationRequired: {exc}", file=__import__("sys").stderr)
@@ -98,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 payload = result.to_dict()
         if args.json:
-            print(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         else:
             print(payload["report"]["body"] if payload.get("report") else payload["result_type"])
         return 0 if payload["result_type"] != "report_blocked" else 2
@@ -113,11 +115,11 @@ def main(argv: list[str] | None = None) -> int:
             "smoke_dir": str(smoke_dir),
         }
         (smoke_dir / "smoke.json").write_text(
-            json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True),
+            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         if args.json:
-            print(json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True))
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         else:
             print(f"smoke ok: {smoke_dir}")
         return 0

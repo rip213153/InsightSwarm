@@ -16,6 +16,7 @@ from insightswarm.agents.browser_agent_tools import (
 )
 from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.agents.trace import build_tool_trace_callback
+from insightswarm.browser_code_session import BrowserCodeSession
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
 
@@ -108,13 +109,12 @@ class BrowserWorker:
             if model_client is None:
                 self._run_fallback(task, tool_state)
             else:
-                self._run_loop(
+                self._run_code_session(
                     task,
                     model_client=model_client,
                     tool_state=tool_state,
-                    loop_state=loop_state,
                     safety_cap=safety_cap,
-                    on_tool_result=build_tool_trace_callback(trace_path, role=BROWSER_ROLE, task=task),
+                    trace_path=trace_path,
                 )
         finally:
             if tool_state.browser_session is not None:
@@ -148,6 +148,33 @@ class BrowserWorker:
             terminal_reason=tool_state.terminal_reason or loop_state.terminal_reason,
         )
 
+    def _run_code_session(
+        self,
+        task: Task,
+        *,
+        model_client: object,
+        tool_state: BrowserAgentToolState,
+        safety_cap: int,
+        trace_path: Path | None,
+    ) -> None:
+        handlers = BrowserAgentToolHandlers(
+            task=task,
+            task_store=self.task_store,
+            mailbox=self.mailbox,
+            artifact_store=self.artifact_store,
+            board_store=self.board_store,
+            state=tool_state,
+            model_client=model_client,
+        )
+        BrowserCodeSession(
+            task=task,
+            handlers=handlers,
+            tool_state=tool_state,
+            model_client=model_client,
+            trace_path=trace_path,
+            max_cells=safety_cap,
+        ).run()
+
     def _run_loop(
         self,
         task: Task,
@@ -165,6 +192,7 @@ class BrowserWorker:
             artifact_store=self.artifact_store,
             board_store=self.board_store,
             state=tool_state,
+            model_client=model_client,
         )
         executor = ToolExecutor(BROWSER_AGENT_TOOLS, handlers.handlers())
         return run_agent_loop(

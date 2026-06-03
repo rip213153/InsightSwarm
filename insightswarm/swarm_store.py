@@ -659,7 +659,7 @@ class ArtifactStore:
         if suffix == ".md":
             payload_path.write_text(str(payload["body"]), encoding="utf-8")
         else:
-            payload_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+            payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
         with self.store.transaction() as conn:
             conn.execute(
                 "UPDATE swarm_artifacts SET payload_ref = ? WHERE artifact_id = ?",

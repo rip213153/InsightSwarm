@@ -325,6 +325,70 @@ def test_delivery_gate_uses_latest_pass_frontier_when_newer_review_is_pending(tm
     assert writer_tasks[0].inputs["evidence_ids"] == [passed_evidence_id]
 
 
+def test_delivery_gate_replaces_stale_writer_frontier(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    mailbox = Mailbox(store)
+    task_store = TaskStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Gate refreshes stale writer frontier",
+        budget={"max_steps": 12},
+        phase="research",
+    )
+    first_evidence_id = _seed_ready_evidence(store, run_state.run_id)
+    first_review = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="done",
+        owner_role="critic",
+        inputs={"question": run_state.objective, "evidence_ids": [first_evidence_id]},
+        created_by="evidence_review_gate",
+    )
+    mailbox.send(
+        run_state.run_id,
+        from_role="critic",
+        broadcast=True,
+        message_type="response",
+        payload={"kind": "pass", "verdict": "pass", "evidence_ids": [first_evidence_id]},
+        related_task_id=first_review.task_id,
+    )
+    first_decision = synchronize_delivery_gate(store, run_state.run_id)
+    first_writer_task = [
+        task for task in store.list_swarm_tasks(run_state.run_id) if task.owner_role == "writer"
+    ][0]
+
+    second_evidence_id = _seed_ready_evidence(store, run_state.run_id)
+    second_review = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="done",
+        owner_role="critic",
+        inputs={"question": run_state.objective, "evidence_ids": [first_evidence_id, second_evidence_id]},
+        created_by="evidence_review_gate",
+    )
+    mailbox.send(
+        run_state.run_id,
+        from_role="critic",
+        broadcast=True,
+        message_type="response",
+        payload={"kind": "pass", "verdict": "pass", "evidence_ids": [first_evidence_id, second_evidence_id]},
+        related_task_id=second_review.task_id,
+    )
+
+    second_decision = synchronize_delivery_gate(store, run_state.run_id)
+    writer_tasks = [
+        task for task in store.list_swarm_tasks(run_state.run_id) if task.owner_role == "writer"
+    ]
+    active_writer_tasks = [task for task in writer_tasks if task.status in {"pending", "leased"}]
+    stale_task = store.get_swarm_task(first_writer_task.task_id or "")
+
+    assert first_decision.frontier_hash
+    assert second_decision.frontier_hash != first_decision.frontier_hash
+    assert stale_task.status == "blocked"
+    assert len(active_writer_tasks) == 1
+    assert active_writer_tasks[0].inputs["evidence_ids"] == [first_evidence_id, second_evidence_id]
+    assert active_writer_tasks[0].inputs["frontier_hash"] == second_decision.frontier_hash
+
+
 def test_delivery_gate_pass_frontier_still_waits_for_material_research_tasks(tmp_path: Path) -> None:
     store = _build_store(tmp_path)
     mailbox = Mailbox(store)

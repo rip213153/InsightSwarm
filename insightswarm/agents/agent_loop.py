@@ -13,6 +13,7 @@ class AgentLoopState:
     event_memory: dict[str, Any] = field(default_factory=lambda: {"events": [], "key_decisions": [], "abandoned_paths": []})
     messages: list[dict[str, Any]] = field(default_factory=list)
     model_failure_count: int = 0
+    tool_contract_recovery: dict[str, Any] | None = None
     terminal_status: str | None = None
     terminal_reason: str | None = None
 
@@ -55,9 +56,15 @@ def run_agent_loop(
                 "error": failure_reason,
                 "terminal": False,
                 "failure_kind": _failure_kind(failure_status, failure_reason),
-                "required_next_step": "Return a valid tool_call. Use an explicit finish_* tool only when the task is truly complete.",
+                "required_next_step": _required_next_step(tool_specs, loop_state),
                 "model_failure_count": loop_state.model_failure_count,
             }
+            loop_state.tool_contract_recovery = _tool_contract_recovery(
+                tool_specs=tool_specs,
+                state=loop_state,
+                failure_status=failure_status,
+                failure_reason=failure_reason,
+            )
             loop_state.messages.append({"role": "assistant", "content": _compact_json(turn, limit=3000)})
             loop_state.messages.append({"role": "tool", "content": _compact_json(tool_result, limit=2000)})
             _append_event(loop_state, round_number, {"name": failure_status, "input": {}}, tool_result)
@@ -83,6 +90,7 @@ def run_agent_loop(
 
         execution = executor.execute(tool_call)
         loop_state.model_failure_count = 0
+        loop_state.tool_contract_recovery = None
         tool_result = execution.to_message()
         _append_event(loop_state, round_number, tool_call, tool_result)
         loop_state.messages.append({"role": "assistant", "content": _compact_json(turn, limit=3000)})
@@ -137,10 +145,12 @@ def _call_model(
         "minimal_event_memory": state.event_memory,
         "recent_tool_transcript": state.messages[-10:],
     }
+    if state.tool_contract_recovery:
+        payload["tool_contract_recovery"] = state.tool_contract_recovery
     result = model_client.complete(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=True, sort_keys=True)},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
         ],
         response_format={"type": "json_object"},
         temperature=0.2,
@@ -180,6 +190,58 @@ def _failure_kind(status: str, reason: str) -> str:
 
 def _recoverable_model_failure(status: str) -> bool:
     return _safe_text(status).lower() in {"model_error", "invalid_json", "model_no_tool"}
+
+
+def _required_next_step(tool_specs: list[dict[str, Any]], state: AgentLoopState) -> str:
+    if _must_start_with_read_task(tool_specs, state):
+        return "Return valid JSON with tool_call.name='read_task' and tool_call.input={}. Do not return tool_call=null."
+    return "Return valid JSON with one tool_call using an exact tool name from tool_specs. Do not return tool_call=null unless a finish_* tool is unavailable."
+
+
+def _tool_contract_recovery(
+    *,
+    tool_specs: list[dict[str, Any]],
+    state: AgentLoopState,
+    failure_status: str,
+    failure_reason: str,
+) -> dict[str, Any]:
+    allowed_tool_names = [str(spec.get("name") or "") for spec in tool_specs if str(spec.get("name") or "")]
+    if _must_start_with_read_task(tool_specs, state):
+        allowed_tool_names = ["read_task"]
+        required_tool = "read_task"
+        required_input: dict[str, Any] = {}
+    else:
+        required_tool = None
+        required_input = {}
+    return {
+        "contract_error": _safe_text(failure_status) or "model_no_tool",
+        "reason": _safe_text(failure_reason)[:500],
+        "allowed_tool_names": allowed_tool_names,
+        "required_tool": required_tool,
+        "required_input": required_input,
+        "instruction": (
+            "Your previous response did not contain a valid tool_call. "
+            "For the next response, return JSON only with private_state and exactly one valid tool_call. "
+            "Do not explain without a tool call."
+        ),
+    }
+
+
+def _must_start_with_read_task(tool_specs: list[dict[str, Any]], state: AgentLoopState) -> bool:
+    if state.model_failure_count < 1:
+        return False
+    tool_names = {str(spec.get("name") or "") for spec in tool_specs}
+    if "read_task" not in tool_names:
+        return False
+    return not any(_message_mentions_tool(message, "read_task") for message in state.messages)
+
+
+def _message_mentions_tool(message: dict[str, Any], tool_name: str) -> bool:
+    try:
+        text = json.dumps(message.get("content"), ensure_ascii=True, default=str)
+    except TypeError:
+        text = str(message.get("content") or "")
+    return f'"name": "{tool_name}"' in text or f'"tool_name": "{tool_name}"' in text
 
 
 def _parse_tool_call(turn: dict[str, Any], tool_specs: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -235,7 +297,7 @@ def _event_summary(tool_call: dict[str, Any], tool_result: dict[str, Any]) -> st
 
 
 def _compact_json(value: Any, *, limit: int) -> Any:
-    text = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     if len(text) <= limit:
         return value
     return {"truncated_json": text[:limit]}

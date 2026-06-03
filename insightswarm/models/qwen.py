@@ -121,7 +121,7 @@ class QwenOpenAICompatibleClient:
         started = time.perf_counter()
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -147,7 +147,7 @@ class QwenOpenAICompatibleClient:
         message = choice.get("message") or {}
         text = message.get("content") or ""
         if isinstance(text, list):
-            text = json.dumps(text, ensure_ascii=True)
+            text = json.dumps(text, ensure_ascii=False)
         return ModelResult(
             text=text,
             json_data=_json_from_text(text),

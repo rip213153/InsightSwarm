@@ -75,7 +75,7 @@ def write_browser_action_request(
         task_id,
         "browser_action_request",
         "application/json",
-        json.dumps(payload, ensure_ascii=True, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         source_url=tool_input.get("url") or (target or {}).get("href"),
         metadata={
             "schema": "browser_action_request.v1",
@@ -247,7 +247,7 @@ def execute_browser_action(
         request_artifact["task_id"],
         "browser_action_execution",
         "application/json",
-        json.dumps(payload, ensure_ascii=True, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         source_url=request_artifact["source_url"],
         metadata={
             "schema": "browser_action_execution.v1",
@@ -280,7 +280,7 @@ def _write_decision(store: Store, run_id: str, task_id: str | None, request_id: 
         task_id,
         "browser_approval_decision",
         "application/json",
-        json.dumps(payload, ensure_ascii=True, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         metadata={"schema": "browser_approval_decision.v1", "request_id": request_id, "decision": decision},
         suffix=".json",
     )

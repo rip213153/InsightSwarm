@@ -19,6 +19,7 @@ from insightswarm.delivery_gate import synchronize_delivery_gate
 from insightswarm.extraction_batches import synchronize_extraction_batches, synchronize_run_evidence_review
 from insightswarm.models.qwen import QwenOpenAICompatibleClient
 from insightswarm.models.router import build_model_client
+from insightswarm.multimodal_inputs import ingest_user_input_files
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
 from insightswarm.util import new_id
 
@@ -75,10 +76,25 @@ class RuntimeState:
     board_store: BoardStore | None = None
     delivery_gate_status: str = "closed"
     delivery_gate_reasons: list[str] = field(default_factory=list)
+    delivery_frontier_hash: str = ""
     stop_reason: StopReason | None = None
     last_progress_at: float = 0.0
     model_client: Any | None = None
     browser_model_client: Any | None = None
+
+
+class BrowserCompositeModelClient:
+    def __init__(self, *, text_model: str, vision_model: str):
+        self.text = QwenOpenAICompatibleClient("qwen_text", text_model)
+        self.vision = QwenOpenAICompatibleClient("aliyun_vision", vision_model)
+        self.provider = "browser_composite"
+        self.model = text_model
+
+    def complete(self, *args: Any, **kwargs: Any) -> Any:
+        return self.text.complete(*args, **kwargs)
+
+    def analyze_image(self, *args: Any, **kwargs: Any) -> Any:
+        return self.vision.analyze_image(*args, **kwargs)
 
 
 def run_objective(
@@ -137,6 +153,7 @@ def create_and_run_objective(
     search_provider: str = "tavily",
     browser_backend: str | None = None,
     browser_cdp_url: str | None = None,
+    input_files: list[str] | None = None,
     **_: Any,
 ) -> DeliveryResult:
     fixture = _fixture_payload()
@@ -144,6 +161,20 @@ def create_and_run_objective(
         os.environ["INSIGHTSWARM_BROWSER_BACKEND"] = browser_backend
     if browser_cdp_url:
         os.environ["INSIGHTSWARM_BROWSER_CDP_URL"] = browser_cdp_url
+    run_id = store.create_run(name, {"query": query, "model_provider": model_provider})
+    store.create_swarm_run_state(
+        run_id=run_id,
+        objective=query,
+        budget={"max_steps": max_steps},
+        phase="discovery",
+    )
+    browser_model_client = _build_browser_model_client()
+    user_input_summaries = ingest_user_input_files(
+        store,
+        run_id,
+        file_paths=input_files,
+        vision_model_client=browser_model_client,
+    )
     metadata = {
         "query": query,
         "model_provider": model_provider,
@@ -151,14 +182,10 @@ def create_and_run_objective(
         "search_provider": search_provider,
         "browser_backend": browser_backend,
         "browser_cdp_url": browser_cdp_url,
+        "user_input_count": len(user_input_summaries),
     }
-    run_id = store.create_run(name, metadata)
-    store.create_swarm_run_state(
-        run_id=run_id,
-        objective=query,
-        budget={"max_steps": max_steps},
-        phase="discovery",
-    )
+    with store.transaction() as conn:
+        conn.execute("UPDATE runs SET metadata_json = ? WHERE run_id = ?", (json.dumps(metadata), run_id))
     task_store = TaskStore(store)
     mailbox = Mailbox(store)
     bootstrap_lead_objective(
@@ -168,9 +195,9 @@ def create_and_run_objective(
         question=query,
         sub_questions=list(fixture.get("sub_questions") or []),
         browser_goal=fixture.get("browser_goal"),
+        user_inputs=user_input_summaries,
     )
     model_client = build_model_client(model_provider if model_provider in {"qwen", "qwen_text", "fake"} else "qwen")
-    browser_model_client = _build_browser_model_client()
     return run_objective(
         store,
         query,
@@ -273,13 +300,14 @@ def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Ev
         decision = synchronize_delivery_gate(store, state.run_id)
         state.delivery_gate_status = decision.status
         state.delivery_gate_reasons = list(decision.reasons)
+        state.delivery_frontier_hash = decision.frontier_hash
 
         current_counts = _progress_counts(store, state.run_id)
         if current_counts != last_counts:
             state.last_progress_at = time.monotonic()
             last_counts = current_counts
 
-        report = _load_report_from_store(store, state.run_id)
+        report = _load_report_from_store(store, state.run_id, frontier_hash=state.delivery_frontier_hash)
         if report is not None:
             state.stop_reason = "deliver_called"
             _write_runtime_trace(state, "stop", {"stop_reason": state.stop_reason})
@@ -358,7 +386,7 @@ def _write_runtime_trace(state: RuntimeState, event: str, payload: dict[str, Any
 
 
 def _build_delivery_result(store: Store, state: RuntimeState, stop_reason: StopReason) -> DeliveryResult:
-    report = _load_report_from_store(store, state.run_id)
+    report = _load_report_from_store(store, state.run_id, frontier_hash=state.delivery_frontier_hash)
     critic = _latest_critic_summary(store, state.run_id) or _default_critic_summary(store, state.run_id)
     fixture = _fixture_payload()
     result_type: DeliveryKind = "report"
@@ -409,7 +437,7 @@ def _build_delivery_result(store: Store, state: RuntimeState, stop_reason: StopR
     )
 
 
-def _load_report_from_store(store: Store, run_id: str) -> dict[str, Any] | None:
+def _load_report_from_store(store: Store, run_id: str, *, frontier_hash: str = "") -> dict[str, Any] | None:
     artifacts = [
         artifact
         for artifact in store.list_swarm_artifacts(run_id)
@@ -417,6 +445,17 @@ def _load_report_from_store(store: Store, run_id: str) -> dict[str, Any] | None:
     ]
     if not artifacts:
         return None
+    if frontier_hash:
+        report_message_by_artifact = {
+            str(message.payload.get("report_artifact_id") or ""): message
+            for message in store.list_swarm_messages(run_id)
+            if message.from_role == "writer"
+            and str(message.payload.get("kind") or "") == "progress_update"
+            and str(message.payload.get("frontier_hash") or "") == frontier_hash
+        }
+        artifacts = [artifact for artifact in artifacts if artifact.artifact_id in report_message_by_artifact]
+        if not artifacts:
+            return None
     artifact = artifacts[-1]
     path = Path(artifact.payload_ref)
     if not path.exists():
@@ -546,7 +585,8 @@ def _fixture_payload() -> dict[str, Any]:
 
 def _build_browser_model_client() -> Any | None:
     model_name = os.getenv("INSIGHTSWARM_BROWSER_QWEN_TEXT_MODEL") or os.getenv("INSIGHTSWARM_BROWSER_MODEL_NAME") or os.getenv("INSIGHTSWARM_QWEN_TEXT_MODEL") or "qwen3.6-plus"
+    vision_model = os.getenv("INSIGHTSWARM_BROWSER_QWEN_OMNI_MODEL") or os.getenv("INSIGHTSWARM_QWEN_OMNI_MODEL") or "qwen3.5-omni-plus-2026-03-15"
     try:
-        return QwenOpenAICompatibleClient("qwen_text", model_name)
+        return BrowserCompositeModelClient(text_model=model_name, vision_model=vision_model)
     except Exception:
         return None

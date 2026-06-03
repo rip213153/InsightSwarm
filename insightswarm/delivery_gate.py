@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from typing import Literal
 
@@ -26,6 +27,7 @@ class DeliveryGateDecision:
     reasons: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     critic_verdict: str | None = None
+    frontier_hash: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -106,6 +108,7 @@ def evaluate_delivery_gate(store: Store, run_id: str) -> DeliveryGateDecision:
         reasons=reasons,
         evidence_ids=delivery_evidence_ids,
         critic_verdict=critic_verdict,
+        frontier_hash=_frontier_hash(delivery_evidence_ids),
     )
 
 
@@ -127,10 +130,14 @@ def _ensure_delivery_request(store: Store, run_id: str, decision: DeliveryGateDe
         for task in store.list_swarm_tasks(run_id)
         if task.owner_role == "writer" and task.kind == "delivery_request" and task.status in {"pending", "leased", "done"}
     ]
-    if existing:
-        return
-    run_state = store.get_swarm_run_state(run_id)
     task_store = TaskStore(store)
+    for task in existing:
+        task_frontier_hash = str(task.inputs.get("frontier_hash") or "")
+        if task_frontier_hash == decision.frontier_hash:
+            return
+        if task.status in {"pending", "leased"}:
+            task_store.block(task.task_id or "")
+    run_state = store.get_swarm_run_state(run_id)
     mailbox = Mailbox(store)
     delivery_task = task_store.create(
         run_id,
@@ -140,6 +147,7 @@ def _ensure_delivery_request(store: Store, run_id: str, decision: DeliveryGateDe
         inputs={
             "question": run_state.objective,
             "evidence_ids": list(decision.evidence_ids),
+            "frontier_hash": decision.frontier_hash,
             "report_kind": _report_kind_for_decision(store, run_id, decision),
         },
         priority=10,
@@ -154,6 +162,7 @@ def _ensure_delivery_request(store: Store, run_id: str, decision: DeliveryGateDe
             "kind": "delivery_request",
             "task_id": delivery_task.task_id,
             "evidence_ids": list(decision.evidence_ids),
+            "frontier_hash": decision.frontier_hash,
             "report_kind": delivery_task.inputs.get("report_kind"),
         },
         related_task_id=delivery_task.task_id,
@@ -220,6 +229,11 @@ def _accepted_frontier_evidence_ids(evidence_rows: list[object], critic_pass: di
     passed_ids = [str(value) for value in list(critic_pass.get("evidence_ids") or []) if str(value)]
     frontier_ids = [evidence_id for evidence_id in passed_ids if evidence_id in ready_id_set]
     return frontier_ids or ready_ids
+
+
+def _frontier_hash(evidence_ids: list[str]) -> str:
+    normalized = "\n".join(sorted(str(evidence_id) for evidence_id in evidence_ids if str(evidence_id)))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 def _report_kind_for_decision(store: Store, run_id: str, decision: DeliveryGateDecision) -> str:

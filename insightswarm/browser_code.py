@@ -166,7 +166,7 @@ def write_browser_code_result(
         task_id,
         "browser_code_result",
         "application/json",
-        json.dumps(payload, ensure_ascii=True, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         metadata={
             "schema": "browser_code_result.v1",
             "tool": "browser.extract_code",

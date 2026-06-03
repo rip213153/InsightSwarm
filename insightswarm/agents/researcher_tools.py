@@ -393,6 +393,7 @@ class ResearcherToolHandlers:
             "task_id": self.task.task_id,
             "task_kind": self.task.kind,
             "board_summary": _summarize_board_snapshot(snapshot),
+            "user_inputs": list(self.task.inputs.get("user_inputs") or []),
         }
         self.state.task_context = context
         return {"ok": True, **context}
@@ -641,6 +642,12 @@ class ResearcherToolHandlers:
             self.state.created_message_ids.append(message.message_id or "")
             document["researcher_status"] = "published"
             document["decision_reason"] = _safe_text(tool_input.get("why_ready"))
+            _close_same_url_documents(
+                self.state.fetched_documents,
+                document,
+                status="published_duplicate",
+                reason="duplicate of published source",
+            )
         create_extraction_batch(
             board_store=self.board_store,
             run_id=self.task.run_id,
@@ -664,28 +671,34 @@ class ResearcherToolHandlers:
         }
 
     def defer_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
-        document = _find_fetched_document(self.state.fetched_documents, _safe_text(tool_input.get("url")))
-        if document is None:
+        documents = _matching_decidable_documents(self.state.fetched_documents, _safe_text(tool_input.get("url")))
+        if not documents:
             return {"ok": False, "error": "source has not been fetched"}
-        if not bool(document.get("usable")):
+        if not any(bool(document.get("usable")) for document in documents):
             return {"ok": False, "error": "only usable fetched sources can be deferred"}
-        document["researcher_status"] = "deferred"
-        document["decision_reason"] = _safe_text(tool_input.get("reason"))
+        reason = _safe_text(tool_input.get("reason"))
+        for document in documents:
+            document["researcher_status"] = "deferred"
+            document["decision_reason"] = reason
         return {
             "ok": True,
-            "deferred_url": _document_url(document),
+            "deferred_url": _document_url(documents[0]),
+            "affected_documents": len(documents),
             "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
         }
 
     def reject_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
-        document = _find_fetched_document(self.state.fetched_documents, _safe_text(tool_input.get("url")))
-        if document is None:
+        documents = _matching_decidable_documents(self.state.fetched_documents, _safe_text(tool_input.get("url")))
+        if not documents:
             return {"ok": False, "error": "source has not been fetched"}
-        document["researcher_status"] = "rejected"
-        document["decision_reason"] = _safe_text(tool_input.get("reason"))
+        reason = _safe_text(tool_input.get("reason"))
+        for document in documents:
+            document["researcher_status"] = "rejected"
+            document["decision_reason"] = reason
         return {
             "ok": True,
-            "rejected_url": _document_url(document),
+            "rejected_url": _document_url(documents[0]),
+            "affected_documents": len(documents),
             "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
         }
 
@@ -1225,21 +1238,50 @@ def _stable_browser_issue_key(*, goal: str, target_url: str, reason: str) -> str
 
 
 def _select_publishable_documents(documents: list[dict[str, Any]], requested_urls: set[str]) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
+    selected_by_url: dict[str, dict[str, Any]] = {}
+    normalized_requested_urls = {_normalize_document_url(item) for item in requested_urls}
     for document in documents:
         url = _document_url(document)
-        if requested_urls and url not in requested_urls:
+        normalized_url = _normalize_document_url(url)
+        if normalized_requested_urls and normalized_url not in normalized_requested_urls:
             continue
-        if bool(document.get("usable")) and document.get("researcher_status") != "published":
-            selected.append(document)
-    return selected
+        if not bool(document.get("usable")) or document.get("researcher_status") not in {"pending", "deferred"}:
+            continue
+        current = selected_by_url.get(normalized_url)
+        if current is None or _publishable_document_score(document) > _publishable_document_score(current):
+            selected_by_url[normalized_url] = document
+    return list(selected_by_url.values())
 
 
 def _find_fetched_document(documents: list[dict[str, Any]], url: str) -> dict[str, Any] | None:
+    normalized_url = _normalize_document_url(url)
     for document in reversed(documents):
-        if _document_url(document) == url:
+        if _normalize_document_url(_document_url(document)) == normalized_url:
             return document
     return None
+
+
+def _matching_decidable_documents(documents: list[dict[str, Any]], url: str) -> list[dict[str, Any]]:
+    normalized_url = _normalize_document_url(url)
+    return [
+        document
+        for document in documents
+        if _normalize_document_url(_document_url(document)) == normalized_url
+        and bool(document.get("usable"))
+        and document.get("researcher_status") in {"pending", "deferred"}
+    ]
+
+
+def _close_same_url_documents(documents: list[dict[str, Any]], published_document: dict[str, Any], *, status: str, reason: str) -> None:
+    normalized_url = _normalize_document_url(_document_url(published_document))
+    for document in documents:
+        if document is published_document:
+            continue
+        if _normalize_document_url(_document_url(document)) != normalized_url:
+            continue
+        if bool(document.get("usable")) and document.get("researcher_status") in {"pending", "deferred"}:
+            document["researcher_status"] = status
+            document["decision_reason"] = reason
 
 
 def _unresolved_publishable_documents(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1261,6 +1303,27 @@ def _document_summary(document: dict[str, Any]) -> dict[str, Any]:
 
 def _document_url(document: dict[str, Any]) -> str:
     return _safe_text(document.get("url") or document.get("source_url"))
+
+
+def _normalize_document_url(url: str) -> str:
+    parsed = urlparse(_safe_text(url))
+    if not parsed.scheme or not parsed.netloc:
+        return _safe_text(url).rstrip("/")
+    path = parsed.path.rstrip("/") or "/"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}{query}"
+
+
+def _publishable_document_score(document: dict[str, Any]) -> int:
+    text_len = len(_safe_text(document.get("text")))
+    score = min(text_len, 5000)
+    if document.get("fetcher") == "firecrawl":
+        score += 500
+    if _safe_text(document.get("information_density")) == "high":
+        score += 250
+    if _safe_text(document.get("page_type")) == "article":
+        score += 100
+    return score
 
 
 def _safe_text(value: Any) -> str:

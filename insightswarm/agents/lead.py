@@ -124,6 +124,7 @@ class LeadWorker:
             if str(item).strip()
         ]
         browser_goal = str(task.inputs.get("browser_goal") or "").strip()
+        user_inputs = list(task.inputs.get("user_inputs") or [])
 
         if not sub_questions and question:
             sub_questions = [question]
@@ -137,6 +138,7 @@ class LeadWorker:
             priority=task.priority,
             created_by="lead",
             dedupe_key=f"objective:{question.lower()}",
+            payload={"user_inputs": user_inputs},
         )
 
         for sub_question in sub_questions[:3]:
@@ -149,6 +151,7 @@ class LeadWorker:
                 owner_role="researcher",
                 priority=max(task.priority - 1, 0),
                 created_by="lead",
+                payload={"user_inputs": user_inputs},
             )
 
         if browser_goal:
@@ -161,7 +164,7 @@ class LeadWorker:
                 owner_role="browser_agent",
                 priority=task.priority,
                 created_by="lead",
-                payload={"goal": browser_goal, "reason": "initial browser acquisition request"},
+                payload={"goal": browser_goal, "reason": "initial browser acquisition request", "user_inputs": user_inputs},
             )
 
         self.board_store.write_plan(
@@ -176,6 +179,7 @@ class LeadWorker:
                 "current_focus": question,
                 "next_opportunities": sub_questions[:3],
                 "browser_goal": browser_goal or None,
+                "user_inputs": user_inputs,
             },
         )
 
@@ -316,6 +320,7 @@ class LeadWorker:
                     "board_item_id": item.item_id,
                     "question_type": question_type,
                     "issue_key": item.payload.get("issue_key"),
+                    "user_inputs": item.payload.get("user_inputs") or [],
                 }
                 message_kind = "hard_acquisition"
                 message_value_key = "goal"
@@ -328,6 +333,7 @@ class LeadWorker:
                     "question_type": question_type or "subquestion",
                     "issue_key": item.payload.get("issue_key"),
                     "repair_context": item.payload.get("repair_context"),
+                    "user_inputs": item.payload.get("user_inputs") or [],
                 }
                 message_kind = kind
                 message_value_key = "question"
@@ -379,6 +385,7 @@ def bootstrap_lead_objective(
     question: str,
     sub_questions: list[str] | None = None,
     browser_goal: str | None = None,
+    user_inputs: list[dict] | None = None,
 ) -> Task:
     root_task = task_store.create(
         run_id,
@@ -389,6 +396,7 @@ def bootstrap_lead_objective(
             "question": question,
             "sub_questions": list(sub_questions or []),
             "browser_goal": browser_goal,
+            "user_inputs": list(user_inputs or []),
         },
         priority=10,
         created_by="run_bootstrap",

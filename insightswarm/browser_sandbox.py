@@ -34,7 +34,7 @@ def write_browser_observation(
         task_id,
         "browser_page_state" if is_page_state else "browser_observation",
         "application/json",
-        json.dumps(payload, ensure_ascii=True, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         source_url=source_url or observation.get("url"),
         metadata={
             "tool": tool_name,

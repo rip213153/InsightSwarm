@@ -189,7 +189,22 @@ class FakeBrowserBackend:
         return self._observation({"text": "ExampleCo pricing page. Starter plan costs $49 per month."})
 
     def screenshot(self, tool_input: dict[str, Any]) -> BrowserObservation:
-        return self._observation({"screenshot_captured": True, "screenshot_base64": None, "screenshot_bytes": 0})
+        return self._observation(
+            {
+                "screenshot_captured": True,
+                "screenshot_base64": None,
+                "screenshot_data_url": None,
+                "screenshot_bytes": 0,
+            }
+        )
+
+    def evaluate_js(self, expression: str) -> Any:
+        del expression
+        return {
+            "url": "https://example.com/pricing",
+            "title": "Example Pricing Page",
+            "text": "ExampleCo pricing page. Starter plan costs $49 per month.",
+        }
 
     def execute(self, action: str, tool_input: dict[str, Any]) -> BrowserObservation:
         observation = {
@@ -285,13 +300,20 @@ class CdpBrowserBackend:
     def screenshot(self, tool_input: dict[str, Any]) -> BrowserObservation:
         payload = self._send("Page.captureScreenshot", {"format": "png", "fromSurface": True})
         data = ((payload.get("result") or {}).get("data") or "")
+        include_base64 = bool(tool_input.get("include_base64") or tool_input.get("include_data_url"))
+        screenshot_base64 = data if include_base64 else (data[:120] + "...[truncated]" if data else None)
         return self._observation(
             {
                 "screenshot_captured": bool(data),
-                "screenshot_base64": data[:120] + "...[truncated]" if data else None,
+                "screenshot_base64": screenshot_base64,
+                "screenshot_data_url": f"data:image/png;base64,{data}" if data and bool(tool_input.get("include_data_url")) else None,
                 "screenshot_bytes": len(base64.b64decode(data)) if data else 0,
             }
         )
+
+    def evaluate_js(self, expression: str) -> Any:
+        payload = self._runtime_evaluate(expression)
+        return _remote_value(payload)
 
     def execute(self, action: str, tool_input: dict[str, Any]) -> BrowserObservation:
         if action == "goto":
@@ -406,7 +428,8 @@ class VisibleCdpBrowserBackend(CdpBrowserBackend):
             )
         port = _find_free_port()
         self.cdp_url = None
-        user_data_dir = self.user_data_dir or str(Path.cwd() / ".tmp" / "browser-profiles" / self.session_id)
+        profile_root = Path(os.getenv("INSIGHTSWARM_BROWSER_PROFILE_ROOT") or (Path(__file__).resolve().parent.parent / ".tmp" / "browser-profiles"))
+        user_data_dir = self.user_data_dir or str(profile_root / self.session_id)
         Path(user_data_dir).mkdir(parents=True, exist_ok=True)
         args = [
             browser_exe,
@@ -461,6 +484,9 @@ class BrowserSession:
 
     def execute(self, action: str, tool_input: dict[str, Any]) -> BrowserObservation:
         return self.backend.execute(action, tool_input)
+
+    def evaluate_js(self, expression: str) -> Any:
+        return self.backend.evaluate_js(expression)
 
 
 def _remote_value(payload: dict[str, Any]) -> Any:

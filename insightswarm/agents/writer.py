@@ -126,6 +126,7 @@ class WriterToolHandlers:
             "ok": True,
             "question": self.context["question"],
             "report_kind": self.context["report_kind"],
+            "frontier_hash": self.context["frontier_hash"],
             "critic_verdict": self.context["critic_verdict"],
             "has_delivery_gap": self.context["has_delivery_gap"],
             "evidence_count": len(list(self.context["evidence_rows"])),
@@ -200,6 +201,8 @@ class WriterToolHandlers:
                 "task_id": self.task.task_id,
                 "report_artifact_id": artifact.artifact_id,
                 "report_kind": report_kind,
+                "frontier_hash": self.context["frontier_hash"],
+                "evidence_ids": list(self.context["evidence_ids"]),
                 "why_ready": str(tool_input.get("why_ready") or ""),
             },
             related_task_id=self.task.task_id,
@@ -271,6 +274,8 @@ class WriterWorker:
             "task": task,
             "question": str(task.inputs.get("question") or ""),
             "report_kind": str(task.inputs.get("report_kind") or "report"),
+            "frontier_hash": str(task.inputs.get("frontier_hash") or ""),
+            "evidence_ids": evidence_ids,
             "evidence_rows": evidence_rows,
             "citations": citations,
             "critic_verdict": _latest_critic_verdict(self.task_store.store, task.run_id),
@@ -365,6 +370,8 @@ class WriterWorker:
                 "task_id": task.task_id,
                 "report_artifact_id": artifact.artifact_id,
                 "report_kind": report_kind,
+                "frontier_hash": context["frontier_hash"],
+                "evidence_ids": list(context["evidence_ids"]),
                 "fallback": True,
             },
             related_task_id=task.task_id,
@@ -413,7 +420,7 @@ def write_report(
                         "role": "user",
                         "content": json.dumps(
                             {"question": question, "citations": citations},
-                            ensure_ascii=True,
+                            ensure_ascii=False,
                         ),
                     },
                 ],
@@ -510,7 +517,7 @@ def _writer_evidence_view(citation: dict) -> dict[str, Any]:
 def _structured_report_coverage_ok(report: dict[str, Any], citations: list[dict]) -> bool:
     if not citations:
         return True
-    report_text = json.dumps(report, ensure_ascii=True, sort_keys=True, default=str)
+    report_text = json.dumps(report, ensure_ascii=False, sort_keys=True, default=str)
     required_urls = {str(citation.get("source_url") or "") for citation in citations if citation.get("source_url")}
     return all(url in report_text for url in required_urls)
 

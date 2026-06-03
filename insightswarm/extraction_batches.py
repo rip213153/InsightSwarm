@@ -11,6 +11,7 @@ from insightswarm.util import now_iso
 EXTRACTION_BATCH_PLAN_KIND = "extraction_batch"
 EXTRACTION_BATCH_TIMEOUT_SECONDS = 900
 TERMINAL_EXTRACTION_STATUSES = {"done", "blocked", "needs_repair", "technical_failed"}
+EXISTING_RUN_REVIEW_STATUSES = {"pending", "leased", "done", "blocked", "needs_repair", "technical_failed"}
 
 
 def create_extraction_batch(
@@ -170,7 +171,7 @@ def _run_review_exists(store: Store, run_id: str, bundle_key: str) -> bool:
     for task in store.list_swarm_tasks(run_id, owner_role="critic"):
         if task.kind != "evidence_review":
             continue
-        if task.status not in {"pending", "leased", "done"}:
+        if task.status not in EXISTING_RUN_REVIEW_STATUSES:
             continue
         if str(task.inputs.get("evidence_scope") or "") != "run":
             continue
