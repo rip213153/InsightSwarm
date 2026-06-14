@@ -13,18 +13,20 @@ $env:PYTHONIOENCODING="utf-8"
 Model and search setup:
 
 ```powershell
-$env:DASHSCOPE_API_KEY="..."
+$env:MODEL_API_KEY="..."
 $env:TAVILY_API_KEY="..."
-$env:INSIGHTSWARM_MODEL_PROVIDER="qwen"
-$env:INSIGHTSWARM_QWEN_TEXT_MODEL="qwen3.7-plus"
+$env:INSIGHTSWARM_MODEL_CONFIG="config.models.json"
+$env:INSIGHTSWARM_MODEL_PROVIDER="default"
 ```
+
+Copy `config.models.example.json` to `config.models.json`, then edit the
+OpenAI-compatible provider `base_url`, `api_key_env`, and model names.
 
 Optional browser and vision setup:
 
 ```powershell
 $env:INSIGHTSWARM_BROWSER_BACKEND="visible"
 $env:INSIGHTSWARM_BROWSER_PROFILE_ROOT="E:\code\InsightSwarm\.tmp\browser-profiles"
-$env:INSIGHTSWARM_QWEN_OMNI_MODEL="qwen3.5-omni-plus-2026-03-15"
 ```
 
 ## Commands
@@ -38,25 +40,25 @@ python -m insightswarm.cli run smoke "smoke test"
 Ask:
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "OpenAI 下一步想做什么？" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
+python -m insightswarm.cli --model-provider default run ask "OpenAI 下一步想做什么？" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
 ```
 
 Ask with visible browser:
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "了解这个网站" --browser-backend visible --search-provider tavily
+python -m insightswarm.cli --model-provider default run ask "了解这个网站" --browser-backend visible --search-provider tavily
 ```
 
 Ask with a local image:
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
+python -m insightswarm.cli --model-provider default run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
 ```
 
 JSON output:
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "DeepSeek 下一步战略" --json
+python -m insightswarm.cli --model-provider default run ask "DeepSeek 下一步战略" --json
 ```
 
 ## Output Locations

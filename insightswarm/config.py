@@ -11,9 +11,7 @@ class Settings:
     artifact_dir: Path
     model_provider: str = "fake"
     config_path: Path | None = None
-    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    qwen_text_model: str = "qwen3.6-flash"
-    qwen_omni_model: str = "qwen3.5-omni-plus-2026-03-15"
+    model_config_path: Path | None = None
 
 
 def _read_dotenv(path: Path = Path(".env")) -> dict[str, str]:
@@ -54,6 +52,7 @@ def load_settings(
     artifact_dir: str | None = None,
     model_provider: str | None = None,
     config_path: str | None = None,
+    model_config_path: str | None = None,
 ) -> Settings:
     dotenv = _read_dotenv()
     yaml_path = Path(config_path) if config_path else Path("config.yaml")
@@ -85,30 +84,17 @@ def load_settings(
         yaml_config.get("model_provider"),
         "fake",
     )
-    qwen_base_url = _first(
-        dotenv.get("INSIGHTSWARM_QWEN_BASE_URL"),
-        os.getenv("INSIGHTSWARM_QWEN_BASE_URL"),
-        yaml_config.get("qwen_base_url"),
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    )
-    qwen_text_model = _first(
-        dotenv.get("INSIGHTSWARM_QWEN_TEXT_MODEL"),
-        os.getenv("INSIGHTSWARM_QWEN_TEXT_MODEL"),
-        yaml_config.get("qwen_text_model"),
-        "qwen3.6-flash",
-    )
-    qwen_omni_model = _first(
-        dotenv.get("INSIGHTSWARM_QWEN_OMNI_MODEL"),
-        os.getenv("INSIGHTSWARM_QWEN_OMNI_MODEL"),
-        yaml_config.get("qwen_omni_model"),
-        "qwen3.5-omni-plus-2026-03-15",
+    resolved_model_config = _first(
+        model_config_path,
+        dotenv.get("INSIGHTSWARM_MODEL_CONFIG"),
+        os.getenv("INSIGHTSWARM_MODEL_CONFIG"),
+        yaml_config.get("model_config_path"),
+        None,
     )
     return Settings(
         resolved_db,
         resolved_artifacts,
         provider or "fake",
         yaml_path,
-        qwen_base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        qwen_text_model or "qwen3.6-flash",
-        qwen_omni_model or "qwen3.5-omni-plus-2026-03-15",
+        Path(resolved_model_config) if resolved_model_config else None,
     )

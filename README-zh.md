@@ -26,19 +26,20 @@ pip install -e ".[browser]"
 ```
 
 将 `.env.example` 复制为 `.env`，或直接设置环境变量。
+将 `config.models.example.json` 复制为 `config.models.json`，然后只修改
+provider 的 `base_url`、`api_key_env` 和模型名即可切换 OpenAI-compatible 端点。
 
 ```powershell
-$env:DASHSCOPE_API_KEY="..."
+$env:MODEL_API_KEY="..."
 $env:TAVILY_API_KEY="..."
-$env:INSIGHTSWARM_MODEL_PROVIDER="qwen"
-$env:INSIGHTSWARM_QWEN_TEXT_MODEL="qwen3.7-plus"
+$env:INSIGHTSWARM_MODEL_CONFIG="config.models.json"
+$env:INSIGHTSWARM_MODEL_PROVIDER="default"
 ```
 
 可选配置：
 
 ```powershell
 $env:FIRECRAWL_API_KEY="..."
-$env:INSIGHTSWARM_QWEN_OMNI_MODEL="qwen3.5-omni-plus-2026-03-15"
 ```
 
 切勿提交真实的 API 密钥。`.env` 文件、运行数据库、生成制品、浏览器配置文件以及临时输出均已被 `.gitignore` 忽略。
@@ -56,7 +57,7 @@ $env:PYTHONIOENCODING="utf-8"
 运行一个实际的研究问题：
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "为什么2026年中国航空公司燃油费屡次上调" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
+python -m insightswarm.cli --model-provider default run ask "为什么2026年中国航空公司燃油费屡次上调" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
 ```
 
 在复杂的网页获取中使用可见的浏览器路径：
@@ -65,13 +66,13 @@ python -m insightswarm.cli --model-provider qwen run ask "为什么2026年中国
 $env:INSIGHTSWARM_BROWSER_BACKEND="visible"
 $env:INSIGHTSWARM_BROWSER_PROFILE_ROOT="E:\code\InsightSwarm\.tmp\browser-profiles"
 
-python -m insightswarm.cli --model-provider qwen run ask "了解这个复杂网站" --browser-backend visible --search-provider tavily
+python -m insightswarm.cli --model-provider default run ask "了解这个复杂网站" --browser-backend visible --search-provider tavily
 ```
 
 附加本地多模态输入（如图片）作为用户提供的上下文：
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
+python -m insightswarm.cli --model-provider default run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
 ```
 
 输出结果将被写入本地以下路径：

@@ -1,0 +1,249 @@
+"""Eval orchestration: run cases over N epochs, score each, aggregate.
+
+A single eval *run* executes every case ``repeat`` times (epochs). Each epoch
+is a full, independent swarm run -- that is where the non-determinism lives, so
+re-judging one transcript would only measure judge noise, not agent variance.
+For every epoch we:
+
+1. drive the swarm to a delivery result,
+2. aggregate run-level telemetry (tokens, latency, citations) from the audit log,
+3. deterministically verify each citation quote against fetched source text,
+4. ask an independent judge model for dimension scores,
+
+then persist the epoch and, once all epochs for a case are in, the per-case
+aggregate (mean / std / stderr). The caller decides significance via
+``insightswarm.eval.stats``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from insightswarm.db.store import Store
+from insightswarm.eval.cases import EvalCase, load_cases
+from insightswarm.eval.judge import JudgeResult, judge_report
+from insightswarm.eval.quote_verify import verify_citations
+from insightswarm.eval.stats import summarize
+from insightswarm.eval.store import EvalStore
+from insightswarm.eval.telemetry import (
+    collect_report_citations,
+    collect_run_telemetry,
+    collect_source_corpus,
+)
+
+
+SwarmRunner = Callable[[EvalCase], Any]
+"""Drives one swarm run for a case and returns its DeliveryResult-like object.
+
+Injected so the runner can be exercised offline with a stub. The production
+implementation is ``build_default_swarm_runner``.
+"""
+
+
+@dataclass
+class EpochOutcome:
+    case_id: str
+    epoch_idx: int
+    swarm_run_id: str
+    result_type: str
+    score_overall: float
+    score_dims: dict[str, float]
+    citation_summary: dict[str, Any]
+    grounded_ratio: float
+    latency_ms: int
+    token_total: int
+    status: str
+    error: str | None
+    judge_rationale: str
+    citation_results: list[dict[str, Any]]
+
+
+def build_default_swarm_runner(
+    store: Store,
+    *,
+    artifact_dir: Path,
+    model_provider: str,
+    model_config_path: str | Path | None = None,
+    max_steps: int = 12,
+    max_runtime_seconds: float = 1800.0,
+) -> SwarmRunner:
+    """Production swarm runner: one ``create_and_run_objective`` per epoch."""
+    from insightswarm.objective_runtime import create_and_run_objective
+
+    def _run(case: EvalCase) -> Any:
+        return create_and_run_objective(
+            store,
+            name=f"eval-{case.case_id}",
+            query=case.question,
+            model_provider=model_provider,
+            model_config_path=model_config_path,
+            artifact_dir=artifact_dir,
+            max_steps=max_steps,
+            max_runtime_seconds=max_runtime_seconds,
+            input_files=list(case.input_files) or None,
+        )
+
+    return _run
+
+
+def run_eval(
+    *,
+    store: Store,
+    eval_store: EvalStore,
+    cases_dir: str | Path,
+    swarm_runner: SwarmRunner,
+    judge_client: Any,
+    target_provider: str,
+    repeat: int = 1,
+    suite: str | None = None,
+    difficulty: str | None = None,
+    case_ids: list[str] | None = None,
+    git_rev: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Execute a full eval run and return its ``eval_run_id``.
+
+    ``swarm_runner`` and ``judge_client`` are injected so the orchestration is
+    testable without live models. ``repeat`` is the epoch count per case.
+    """
+    cases = load_cases(cases_dir, suite=suite, difficulty=difficulty)
+    if case_ids:
+        wanted = set(case_ids)
+        cases = [case for case in cases if case.case_id in wanted]
+    if not cases:
+        raise ValueError("no eval cases selected")
+
+    repeat = max(1, int(repeat))
+    suite_name = suite or "all"
+    eval_run_id = eval_store.create_eval_run(
+        suite=suite_name,
+        judge_provider=getattr(judge_client, "provider", "none"),
+        judge_model=getattr(judge_client, "model", None),
+        target_provider=target_provider,
+        repeat_n=repeat,
+        git_rev=git_rev,
+        notes=notes,
+    )
+
+    for case in cases:
+        overall_scores: list[float] = []
+        grounded_ratios: list[float] = []
+        for epoch_idx in range(repeat):
+            outcome = _run_one_epoch(
+                store=store,
+                case=case,
+                epoch_idx=epoch_idx,
+                swarm_runner=swarm_runner,
+                judge_client=judge_client,
+            )
+            epoch_id = eval_store.record_epoch(
+                eval_run_id=eval_run_id,
+                case_id=outcome.case_id,
+                epoch_idx=outcome.epoch_idx,
+                swarm_run_id=outcome.swarm_run_id or None,
+                result_type=outcome.result_type,
+                score_overall=outcome.score_overall,
+                score_dims=outcome.score_dims,
+                citation_summary=outcome.citation_summary,
+                grounded_ratio=outcome.grounded_ratio,
+                latency_ms=outcome.latency_ms,
+                token_total=outcome.token_total,
+                status=outcome.status,
+                error=outcome.error,
+                judge_rationale=outcome.judge_rationale,
+            )
+            if outcome.citation_results:
+                eval_store.record_citation_checks(epoch_id, outcome.citation_results)
+            overall_scores.append(outcome.score_overall)
+            grounded_ratios.append(outcome.grounded_ratio)
+
+        agg = summarize(overall_scores)
+        mean_grounded = sum(grounded_ratios) / len(grounded_ratios) if grounded_ratios else 0.0
+        eval_store.upsert_case_agg(
+            eval_run_id=eval_run_id,
+            case_id=case.case_id,
+            n_epochs=agg.n,
+            mean=agg.mean,
+            std=agg.std,
+            stderr=agg.stderr,
+            min_score=agg.min_score,
+            max_score=agg.max_score,
+            mean_grounded_ratio=round(mean_grounded, 4),
+        )
+
+    eval_store.finish_eval_run(eval_run_id)
+    return eval_run_id
+
+
+def _run_one_epoch(
+    *,
+    store: Store,
+    case: EvalCase,
+    epoch_idx: int,
+    swarm_runner: SwarmRunner,
+    judge_client: Any,
+) -> EpochOutcome:
+    try:
+        delivery = swarm_runner(case)
+    except Exception as exc:  # one failed epoch must not abort the suite
+        return EpochOutcome(
+            case_id=case.case_id,
+            epoch_idx=epoch_idx,
+            swarm_run_id="",
+            result_type="error",
+            score_overall=0.0,
+            score_dims={},
+            citation_summary={},
+            grounded_ratio=0.0,
+            latency_ms=0,
+            token_total=0,
+            status="error",
+            error=f"{type(exc).__name__}: {exc}"[:500],
+            judge_rationale="swarm run raised before delivery",
+            citation_results=[],
+        )
+
+    payload = delivery.to_dict() if hasattr(delivery, "to_dict") else dict(delivery)
+    run_id = str(payload.get("run_id") or "")
+    result_type = str(payload.get("result_type") or "unknown")
+    report_body = ""
+    report = payload.get("report")
+    if isinstance(report, dict):
+        report_body = str(report.get("body") or "")
+
+    telemetry = collect_run_telemetry(store, run_id) if run_id else None
+    citations = collect_report_citations(store, run_id) if run_id else []
+    source_by_url = collect_source_corpus(store, run_id) if run_id else {}
+    corpus = "\n\n".join(source_by_url.values())
+    citation_summary = verify_citations(citations, source_by_url, corpus=corpus)
+
+    judge_result: JudgeResult = judge_report(
+        model_client=judge_client,
+        case=case,
+        report_body=report_body,
+        citation_summary=citation_summary,
+        run_id=run_id or None,
+    )
+
+    rationale_text = "; ".join(
+        f"{dimension}: {text}" for dimension, text in judge_result.rationale.items() if text
+    )[:1000]
+
+    return EpochOutcome(
+        case_id=case.case_id,
+        epoch_idx=epoch_idx,
+        swarm_run_id=run_id,
+        result_type=result_type,
+        score_overall=judge_result.score_overall,
+        score_dims=judge_result.scores,
+        citation_summary=citation_summary.to_dict(),
+        grounded_ratio=citation_summary.grounded_ratio,
+        latency_ms=int(telemetry.latency_ms_total) if telemetry else 0,
+        token_total=int(telemetry.token_total) if telemetry else 0,
+        status=str(payload.get("final_state") or judge_result.status or "unknown"),
+        error=judge_result.error,
+        judge_rationale=rationale_text,
+        citation_results=list(citation_summary.results),
+    )

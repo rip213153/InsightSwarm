@@ -1,0 +1,45 @@
+{
+  "providers": {
+    "default": {
+      "type": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "models": {
+        "text": "deepseek-ai/DeepSeek-V3.2",
+        "vision": "deepseek-ai/DeepSeek-V3.2"
+      }
+    }
+  },
+  "agents": {
+    "default": {
+      "provider": "default",
+      "capability": "text"
+    },
+    "lead": {
+      "provider": "default"
+    },
+    "researcher": {
+      "provider": "default"
+    },
+    "extractor": {
+      "provider": "default"
+    },
+    "critic": {
+      "provider": "default"
+    },
+    "writer": {
+      "provider": "default"
+    },
+    "vision": {
+      "provider": "default",
+      "capability": "vision"
+    },
+    "browser": {
+      "provider": "default",
+      "capability": "vision"
+    },
+    "judge": {
+      "provider": "default"
+    }
+  }
+}

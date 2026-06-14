@@ -1,0 +1,61 @@
+{
+  "providers": {
+    "default": {
+      "type": "openai_compatible",
+      "base_url": "https://api.example.com/v1",
+      "api_key_env": "MODEL_API_KEY",
+      "models": {
+        "text": "text-model-name",
+        "vision": "vision-model-name"
+      }
+    },
+    "fast": {
+      "type": "openai_compatible",
+      "base_url": "https://api.example.com/v1",
+      "api_key_env": "FAST_MODEL_API_KEY",
+      "models": {
+        "text": "fast-text-model-name"
+      }
+    },
+    "strong": {
+      "type": "openai_compatible",
+      "base_url": "https://api.example.com/v1",
+      "api_key_env": "STRONG_MODEL_API_KEY",
+      "models": {
+        "text": "strong-text-model-name"
+      }
+    }
+  },
+  "agents": {
+    "default": {
+      "provider": "default",
+      "capability": "text"
+    },
+    "lead": {
+      "provider": "default"
+    },
+    "researcher": {
+      "provider": "fast"
+    },
+    "extractor": {
+      "provider": "fast"
+    },
+    "critic": {
+      "provider": "strong"
+    },
+    "writer": {
+      "provider": "default"
+    },
+    "vision": {
+      "provider": "default",
+      "capability": "vision"
+    },
+    "browser": {
+      "provider": "default",
+      "capability": "vision"
+    },
+    "judge": {
+      "provider": "strong"
+    }
+  }
+}

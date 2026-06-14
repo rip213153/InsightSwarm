@@ -3,77 +3,45 @@ from __future__ import annotations
 from insightswarm.db.store import Store
 from insightswarm.models.audit import AuditedModelClient
 from insightswarm.models.fake import FakeModelClient
-from insightswarm.models.qwen import QwenOpenAICompatibleClient
-
-SUPPORTED_PROVIDERS = {
-    "fake",
-    "qwen",
-    "deepseek",
-    "openai_compatible",
-    "qwen_text",
-    "aliyun_text",
-    "aliyun_vision",
-}
+from insightswarm.models.registry import ModelRegistry
 
 
-class UnimplementedModelClient:
-    def __init__(self, provider: str):
-        self.provider = provider
-        self.model = f"{provider}-not-implemented"
+def build_model_client(
+    provider: str,
+    *,
+    model_config_path: str | None = None,
+    capability: str = "text",
+    model: str | None = None,
+):
+    """Build a model client.
 
-    def complete(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"Model provider '{self.provider}' is registered but not implemented in Milestone 2."
-        )
-
-    def analyze_image(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"Vision provider '{self.provider}' is registered but not implemented in Milestone 2."
-        )
-
-
-class QwenSwarmClient:
-    def __init__(self):
-        self.text = QwenOpenAICompatibleClient(
-            "qwen_text",
-            __import__("os").getenv("INSIGHTSWARM_QWEN_TEXT_MODEL", "qwen3.6-flash"),
-        )
-        self.vision = QwenOpenAICompatibleClient(
-            "aliyun_vision",
-            __import__("os").getenv(
-                "INSIGHTSWARM_QWEN_OMNI_MODEL",
-                "qwen3.5-omni-plus-2026-03-15",
-            ),
-        )
-
-    def complete(self, *args, **kwargs):
-        return self.text.complete(*args, **kwargs)
-
-    def analyze_image(self, *args, **kwargs):
-        return self.vision.analyze_image(*args, **kwargs)
+    Without a model config file, only the deterministic fake client is available.
+    Real providers are intentionally config-driven: their base URL, API key env,
+    and model names live in ``config.models.json`` rather than in code.
+    """
+    if provider == "fake" and not model_config_path:
+        return FakeModelClient()
+    return ModelRegistry.from_file(model_config_path).for_provider(
+        provider,
+        capability=capability,
+        model=model,
+    )
 
 
-def build_model_client(provider: str):
-    if provider not in SUPPORTED_PROVIDERS:
-        raise ValueError(
-            f"Unsupported model provider '{provider}'. Supported providers: {', '.join(sorted(SUPPORTED_PROVIDERS))}"
-        )
-    if provider == "qwen":
-        return QwenSwarmClient()
-    if provider == "qwen_text":
-        return QwenSwarmClient()
-    if provider == "aliyun_vision":
-        return QwenOpenAICompatibleClient(
-            "aliyun_vision",
-            __import__("os").getenv(
-                "INSIGHTSWARM_QWEN_OMNI_MODEL",
-                "qwen3.5-omni-plus-2026-03-15",
-            ),
-        )
-    if provider != "fake":
-        return UnimplementedModelClient(provider)
-    return FakeModelClient()
-
-
-def build_audited_model_client(provider: str, store: Store):
-    return AuditedModelClient(build_model_client(provider), store)
+def build_audited_model_client(
+    provider: str,
+    store: Store,
+    *,
+    model_config_path: str | None = None,
+    capability: str = "text",
+    model: str | None = None,
+):
+    return AuditedModelClient(
+        build_model_client(
+            provider,
+            model_config_path=model_config_path,
+            capability=capability,
+            model=model,
+        ),
+        store,
+    )

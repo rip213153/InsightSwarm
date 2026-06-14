@@ -1,0 +1,18 @@
+{
+  "case_id": "openai-strategy-early",
+  "question": "What is OpenAI's product and model strategy?",
+  "suite": "golden",
+  "difficulty": "heavy",
+  "must_cover": [
+    "Consolidation of the model ecosystem into a unified system (GPT-5)",
+    "Integration of reasoning (o3) into core models",
+    "Removal of the 'model picker' to simplify user experience",
+    "Bundling multimodal capabilities (voice, image, search, Deep Research)",
+    "Expansion into dedicated AI hardware with Jony Ive"
+  ],
+  "must_not_claim": [
+    "Confirmed DevDay 2025 launches (Sora 2, AgentKit, Apps SDK) as established facts",
+    "Stargate Project infrastructure details as covered by the evidence"
+  ],
+  "notes": "Derived from docs/早期OPENAI报告.md. This report was partial; source bundle was truncated, so over-claiming roadmap specifics is a trap."
+}

@@ -1,0 +1,17 @@
+{
+  "case_id": "fuel-surcharge-2026",
+  "question": "为什么2026年中国航空公司燃油费屡次上调？",
+  "suite": "golden",
+  "difficulty": "heavy",
+  "must_cover": [
+    "Middle East geopolitical conflict pushed international crude oil prices up",
+    "Fuel cost is roughly 30%-33% of major Chinese carriers' operating cost",
+    "Domestic fuel surcharge was raised at least twice (April 5 and May 16, 2026)",
+    "The April adjustment magnitude reached about 500%"
+  ],
+  "must_not_claim": [
+    "Specific future surcharge adjustments beyond May 2026",
+    "International airline comparison data not present in the sources"
+  ],
+  "notes": "Derived from docs/燃油费报告.md. Chinese-language case; exercises full-width punctuation in citation grounding."
+}

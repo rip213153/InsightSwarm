@@ -1,0 +1,17 @@
+{
+  "case_id": "jd-next-strategy",
+  "question": "京东下一个想做什么板块？",
+  "suite": "golden",
+  "difficulty": "heavy",
+  "must_cover": [
+    "Food delivery and instant retail are identified as primary long-term strategic directions",
+    "The 'new business' segment showed explosive revenue growth in 2025 (~157% YoY)",
+    "International business expansion is part of the strategy",
+    "Differentiated models such as Seven Fresh Kitchen catering"
+  ],
+  "must_not_claim": [
+    "A precise standalone profit/loss figure for JD Food Delivery alone",
+    "Granular per-venture capital allocation that the sources do not break out"
+  ],
+  "notes": "Derived from docs/京东的报告.md. Sources aggregate new-business revenue; per-venture breakdown is intentionally a hallucination trap."
+}

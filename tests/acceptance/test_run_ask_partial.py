@@ -4,12 +4,12 @@ import json
 
 from insightswarm.cli import main as cli_main
 
-from tests.acceptance.conftest import acceptance_workspace, require_real_qwen
+from tests.acceptance.conftest import acceptance_workspace, require_real_model_config
 
 
 def test_run_ask_partial(monkeypatch, capsys):
-    require_real_qwen(monkeypatch)
     workspace = acceptance_workspace("partial")
+    require_real_model_config(monkeypatch, workspace)
 
     monkeypatch.setenv("INSIGHTSWARM_SCRIPTED_FIXTURE", "partial_missing_evidence")
 

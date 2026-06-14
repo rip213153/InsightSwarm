@@ -1,0 +1,17 @@
+{
+  "case_id": "cartier-site-image",
+  "question": "我想了解这张图片里的网站",
+  "suite": "golden",
+  "difficulty": "light",
+  "must_cover": [
+    "The site is an immersive digital showcase for Cartier's Watches & Wonders",
+    "Interactive storytelling: scroll-based journey, real-time animations, clickable hotspots",
+    "Industry recognition: 'Site of the Day' from Awwwards, FWA, CSSDA"
+  ],
+  "must_not_claim": [
+    "Business metrics or user traffic data not in the source",
+    "Details about the 2025 iteration of the website"
+  ],
+  "input_files": [],
+  "notes": "Derived from docs/图片提问示例.md. Multimodal case (image input). input_files left empty until the sample image is wired in; runner will treat as text-only until then."
+}

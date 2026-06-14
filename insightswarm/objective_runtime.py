@@ -17,7 +17,7 @@ from insightswarm.agents.writer import WriterWorker
 from insightswarm.db.store import Store
 from insightswarm.delivery_gate import synchronize_delivery_gate
 from insightswarm.extraction_batches import synchronize_extraction_batches, synchronize_run_evidence_review
-from insightswarm.models.qwen import QwenOpenAICompatibleClient
+from insightswarm.models.registry import ModelRegistry
 from insightswarm.models.router import build_model_client
 from insightswarm.multimodal_inputs import ingest_user_input_files
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
@@ -81,20 +81,7 @@ class RuntimeState:
     last_progress_at: float = 0.0
     model_client: Any | None = None
     browser_model_client: Any | None = None
-
-
-class BrowserCompositeModelClient:
-    def __init__(self, *, text_model: str, vision_model: str):
-        self.text = QwenOpenAICompatibleClient("qwen_text", text_model)
-        self.vision = QwenOpenAICompatibleClient("aliyun_vision", vision_model)
-        self.provider = "browser_composite"
-        self.model = text_model
-
-    def complete(self, *args: Any, **kwargs: Any) -> Any:
-        return self.text.complete(*args, **kwargs)
-
-    def analyze_image(self, *args: Any, **kwargs: Any) -> Any:
-        return self.vision.analyze_image(*args, **kwargs)
+    model_registry: ModelRegistry | None = None
 
 
 def run_objective(
@@ -105,6 +92,7 @@ def run_objective(
     model_client: Any | None = None,
     run_id: str | None = None,
     browser_model_client: Any | None = None,
+    model_registry: ModelRegistry | None = None,
 ) -> DeliveryResult:
     run_id = run_id or new_id("run")
     run_dir = run_root / ".tmp" / f"run-{run_id}"
@@ -121,7 +109,8 @@ def run_objective(
         board_store=BoardStore(store),
         last_progress_at=time.monotonic(),
         model_client=model_client,
-        browser_model_client=browser_model_client or _build_browser_model_client(),
+        browser_model_client=browser_model_client,
+        model_registry=model_registry,
     )
     state.task_store.recover_expired_leases(run_id)
 
@@ -144,6 +133,7 @@ def create_and_run_objective(
     name: str,
     query: str,
     model_provider: str,
+    model_config_path: str | Path | None = None,
     artifact_dir: Path,
     max_steps: int = 12,
     max_runtime_seconds: float = 1800.0,
@@ -168,7 +158,12 @@ def create_and_run_objective(
         budget={"max_steps": max_steps},
         phase="discovery",
     )
-    browser_model_client = _build_browser_model_client()
+    model_registry = (
+        ModelRegistry.from_file(model_config_path, store=store)
+        if model_config_path
+        else None
+    )
+    browser_model_client = model_registry.for_agent("vision", capability="vision") if model_registry is not None else None
     user_input_summaries = ingest_user_input_files(
         store,
         run_id,
@@ -197,7 +192,7 @@ def create_and_run_objective(
         browser_goal=fixture.get("browser_goal"),
         user_inputs=user_input_summaries,
     )
-    model_client = build_model_client(model_provider if model_provider in {"qwen", "qwen_text", "fake"} else "qwen")
+    model_client = None if model_registry else build_model_client(model_provider)
     return run_objective(
         store,
         query,
@@ -211,6 +206,7 @@ def create_and_run_objective(
         model_client=model_client,
         run_id=run_id,
         browser_model_client=browser_model_client,
+        model_registry=model_registry,
     )
 
 
@@ -232,7 +228,7 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
                 state.run_id,
                 stop_event,
                 poll_interval=0.05,
-                model_client=state.browser_model_client or state.model_client,
+                model_client=state.browser_model_client or _agent_model(state, "browser", capability="vision"),
                 trace_path=state.step_trace_path,
             ),
             daemon=True,
@@ -242,7 +238,7 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
                 state.run_id,
                 stop_event,
                 poll_interval=0.05,
-                model_client=state.model_client,
+                model_client=_agent_model(state, "extractor"),
                 trace_path=state.step_trace_path,
             ),
             daemon=True,
@@ -252,7 +248,7 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
                 state.run_id,
                 stop_event,
                 poll_interval=0.05,
-                model_client=state.model_client,
+                model_client=_agent_model(state, "researcher"),
                 trace_path=state.step_trace_path,
             ),
             daemon=True,
@@ -262,7 +258,7 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
                 state.run_id,
                 stop_event,
                 poll_interval=0.05,
-                model_client=state.model_client,
+                model_client=_agent_model(state, "critic"),
                 trace_path=state.step_trace_path,
             ),
             daemon=True,
@@ -272,7 +268,7 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
                 state.run_id,
                 stop_event,
                 poll_interval=0.05,
-                model_client=state.model_client,
+                model_client=_agent_model(state, "writer"),
             ),
             daemon=True,
         ),
@@ -280,6 +276,12 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
     for thread in threads:
         thread.start()
     return threads
+
+
+def _agent_model(state: RuntimeState, role: str, *, capability: str = "text") -> Any | None:
+    if state.model_registry is not None:
+        return state.model_registry.for_agent(role, capability=capability)
+    return state.model_client
 
 
 def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Event) -> None:
@@ -583,10 +585,3 @@ def _fixture_payload() -> dict[str, Any]:
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
-def _build_browser_model_client() -> Any | None:
-    model_name = os.getenv("INSIGHTSWARM_BROWSER_QWEN_TEXT_MODEL") or os.getenv("INSIGHTSWARM_BROWSER_MODEL_NAME") or os.getenv("INSIGHTSWARM_QWEN_TEXT_MODEL") or "qwen3.6-plus"
-    vision_model = os.getenv("INSIGHTSWARM_BROWSER_QWEN_OMNI_MODEL") or os.getenv("INSIGHTSWARM_QWEN_OMNI_MODEL") or "qwen3.5-omni-plus-2026-03-15"
-    try:
-        return BrowserCompositeModelClient(text_model=model_name, vision_model=vision_model)
-    except Exception:
-        return None

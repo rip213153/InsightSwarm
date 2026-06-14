@@ -13,7 +13,7 @@ from typing import Any
 from insightswarm.models.clients import ModelResult
 
 
-class QwenConfigError(RuntimeError):
+class OpenAICompatibleConfigError(RuntimeError):
     pass
 
 
@@ -37,17 +37,18 @@ def _json_from_text(text: str) -> dict[str, Any] | None:
     return None
 
 
-class QwenOpenAICompatibleClient:
+class OpenAICompatibleClient:
     def __init__(
         self,
         provider: str,
         model: str,
-        base_url: str | None = None,
-        api_key_env: str = "DASHSCOPE_API_KEY",
+        *,
+        base_url: str,
+        api_key_env: str,
     ):
         self.provider = provider
         self.model = model
-        self.base_url = (base_url or os.getenv("INSIGHTSWARM_QWEN_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+        self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
 
     def complete(
@@ -110,7 +111,7 @@ class QwenOpenAICompatibleClient:
     ) -> ModelResult:
         api_key = os.getenv(self.api_key_env)
         if not api_key:
-            raise QwenConfigError(f"{self.api_key_env} is required for provider '{self.provider}'.")
+            raise OpenAICompatibleConfigError(f"{self.api_key_env} is required for provider '{self.provider}'.")
         payload: dict[str, Any] = {"model": self.model, "messages": messages}
         if response_format:
             payload["response_format"] = response_format
@@ -134,14 +135,14 @@ class QwenOpenAICompatibleClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             return self._error_result(
-                f"Qwen API HTTP {exc.code}: {detail[:500]}",
+                f"OpenAI-compatible API HTTP {exc.code}: {detail[:500]}",
                 started,
                 {"http_status": exc.code},
             )
         except urllib.error.URLError as exc:
-            return self._error_result(f"Qwen API request failed: {exc.reason}", started)
+            return self._error_result(f"OpenAI-compatible API request failed: {exc.reason}", started)
         except (TimeoutError, socket.timeout) as exc:
-            return self._error_result(f"Qwen API request timed out: {exc}", started)
+            return self._error_result(f"OpenAI-compatible API request timed out: {exc}", started)
         latency_ms = int((time.perf_counter() - started) * 1000)
         choice = (raw.get("choices") or [{}])[0]
         message = choice.get("message") or {}

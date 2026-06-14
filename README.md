@@ -34,19 +34,21 @@ pip install -e ".[browser]"
 ```
 
 Copy `.env.example` to `.env` or set environment variables directly.
+Copy `config.models.example.json` to `config.models.json`, then edit only the
+provider `base_url`, `api_key_env`, and model names for your OpenAI-compatible
+endpoint.
 
 ```powershell
-$env:DASHSCOPE_API_KEY="..."
+$env:MODEL_API_KEY="..."
 $env:TAVILY_API_KEY="..."
-$env:INSIGHTSWARM_MODEL_PROVIDER="qwen"
-$env:INSIGHTSWARM_QWEN_TEXT_MODEL="qwen3.7-plus"
+$env:INSIGHTSWARM_MODEL_CONFIG="config.models.json"
+$env:INSIGHTSWARM_MODEL_PROVIDER="default"
 ```
 
 Optional:
 
 ```powershell
 $env:FIRECRAWL_API_KEY="..."
-$env:INSIGHTSWARM_QWEN_OMNI_MODEL="qwen3.5-omni-plus-2026-03-15"
 ```
 
 Never commit real keys. `.env` files, run databases, artifacts, browser
@@ -65,7 +67,7 @@ $env:PYTHONIOENCODING="utf-8"
 Run a real research question:
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "为什么2026年中国航空公司燃油费屡次上调" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
+python -m insightswarm.cli --model-provider default run ask "为什么2026年中国航空公司燃油费屡次上调" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
 ```
 
 Use the visible browser path for hard acquisition:
@@ -74,13 +76,13 @@ Use the visible browser path for hard acquisition:
 $env:INSIGHTSWARM_BROWSER_BACKEND="visible"
 $env:INSIGHTSWARM_BROWSER_PROFILE_ROOT="E:\code\InsightSwarm\.tmp\browser-profiles"
 
-python -m insightswarm.cli --model-provider qwen run ask "了解这个复杂网站" --browser-backend visible --search-provider tavily
+python -m insightswarm.cli --model-provider default run ask "了解这个复杂网站" --browser-backend visible --search-provider tavily
 ```
 
 Attach local multimodal input, such as an image, as user-provided context:
 
 ```powershell
-python -m insightswarm.cli --model-provider qwen run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
+python -m insightswarm.cli --model-provider default run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
 ```
 
 Outputs are written locally under:

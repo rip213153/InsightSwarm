@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InsightSwarm 15s Promo</title>
+  <style>
+    :root {
+      --bg: #07110f;
+      --ink: #f4f0df;
+      --muted: #a9b6a8;
+      --line: rgba(211, 232, 190, 0.22);
+      --green: #b8ff74;
+      --amber: #ffca63;
+      --cyan: #75e9ff;
+      --red: #ff6f61;
+      --panel: rgba(15, 31, 26, 0.72);
+      --serif: Georgia, "Times New Roman", serif;
+      --mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+      --sans: "Aptos", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+    body { display: grid; place-items: center; color: var(--ink); font-family: var(--sans); }
+
+    .stage {
+      position: relative;
+      width: 100vw;
+      height: 56.25vw;
+      max-height: 100vh;
+      max-width: 177.7778vh;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(117, 233, 255, 0.19), transparent 28%),
+        radial-gradient(circle at 80% 18%, rgba(184, 255, 116, 0.16), transparent 28%),
+        linear-gradient(135deg, #07110f 0%, #0d1715 42%, #171508 100%);
+      isolation: isolate;
+    }
+
+    .stage::before {
+      content: "";
+      position: absolute;
+      inset: -20%;
+      background:
+        linear-gradient(var(--line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line) 1px, transparent 1px);
+      background-size: 72px 72px;
+      transform: perspective(900px) rotateX(58deg) translateY(-18%);
+      transform-origin: center top;
+      opacity: 0.45;
+      animation: grid-drift 15s linear forwards;
+      z-index: -2;
+    }
+
+    .stage::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 50% 50%, transparent 35%, rgba(0, 0, 0, 0.58) 100%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.035), rgba(255,255,255,0.035) 1px, transparent 1px, transparent 4px);
+      mix-blend-mode: screen;
+      pointer-events: none;
+    }
+
+    @keyframes grid-drift {
+      from { background-position: 0 0, 0 0; }
+      to { background-position: 0 360px, 360px 0; }
+    }
+
+    .scene { position: absolute; inset: 0; opacity: 0; transform: translateY(18px); }
+    .scene-1 { animation: scene 3.6s ease both; }
+    .scene-2 { animation: scene 4.2s ease 3.1s both; }
+    .scene-3 { animation: scene 4.2s ease 6.8s both; }
+    .scene-4 { animation: scene 4.2s ease 10.9s both; }
+
+    @keyframes scene {
+      0% { opacity: 0; transform: translateY(22px) scale(0.985); }
+      12%, 78% { opacity: 1; transform: translateY(0) scale(1); }
+      100% { opacity: 0; transform: translateY(-18px) scale(1.01); }
+    }
+
+    .brand {
+      position: absolute;
+      left: 74px;
+      top: 54px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-family: var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-size: 20px;
+      z-index: 5;
+    }
+
+    .brand-mark {
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--green);
+      border-radius: 50%;
+      box-shadow: 0 0 28px rgba(184, 255, 116, 0.9);
+    }
+
+    .timecode {
+      position: absolute;
+      right: 72px;
+      top: 54px;
+      font: 18px/1 var(--mono);
+      color: var(--muted);
+      z-index: 5;
+    }
+
+    .headline {
+      position: absolute;
+      left: 82px;
+      top: 224px;
+      width: 1050px;
+      font-family: var(--serif);
+      font-size: 94px;
+      line-height: 0.95;
+      letter-spacing: -0.055em;
+    }
+
+    .headline strong { color: var(--green); font-weight: 500; }
+    .subline {
+      position: absolute;
+      left: 88px;
+      top: 510px;
+      width: 780px;
+      color: var(--muted);
+      font-size: 30px;
+      line-height: 1.34;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      height: 42px;
+      padding: 0 18px;
+      border: 1px solid rgba(184, 255, 116, 0.4);
+      border-radius: 999px;
+      color: var(--green);
+      font: 17px/1 var(--mono);
+      background: rgba(184, 255, 116, 0.06);
+    }
+
+    .question-card {
+      position: absolute;
+      right: 90px;
+      top: 226px;
+      width: 520px;
+      padding: 28px;
+      border: 1px solid rgba(255, 202, 99, 0.36);
+      background: linear-gradient(145deg, rgba(255, 202, 99, 0.12), rgba(15, 31, 26, 0.76));
+      box-shadow: 0 30px 120px rgba(0,0,0,0.38);
+      transform: rotate(-2deg);
+    }
+
+    .question-card .label {
+      color: var(--amber);
+      font: 16px/1 var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 18px;
+    }
+
+    .question-card p {
+      margin: 0;
+      font-size: 36px;
+      line-height: 1.15;
+      font-weight: 650;
+    }
+
+    .workbench {
+      position: absolute;
+      inset: 166px 82px 112px;
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 34px;
+    }
+
+    .panel {
+      border: 1px solid rgba(211, 232, 190, 0.22);
+      background: var(--panel);
+      backdrop-filter: blur(18px);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 30px 120px rgba(0,0,0,0.36);
+    }
+
+    .agent-map {
+      position: relative;
+      min-height: 630px;
+      padding: 40px;
+    }
+
+    .node {
+      position: absolute;
+      width: 230px;
+      padding: 18px 20px;
+      border: 1px solid rgba(184, 255, 116, 0.36);
+      background: rgba(9, 20, 17, 0.88);
+      box-shadow: 0 0 42px rgba(184, 255, 116, 0.08);
+      font: 20px/1.2 var(--mono);
+      animation: pulse 1.8s ease-in-out infinite alternate;
+    }
+
+    .node span { display: block; margin-top: 8px; color: var(--muted); font: 15px/1.25 var(--sans); }
+    .n1 { left: 72px; top: 96px; }
+    .n2 { right: 70px; top: 86px; animation-delay: 0.15s; }
+    .n3 { left: 104px; bottom: 86px; animation-delay: 0.3s; }
+    .n4 { right: 96px; bottom: 76px; animation-delay: 0.45s; }
+    .store {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 260px;
+      height: 260px;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      border: 1px solid rgba(117, 233, 255, 0.55);
+      background: radial-gradient(circle, rgba(117, 233, 255, 0.2), rgba(9,20,17,0.72) 70%);
+      font: 25px/1.15 var(--mono);
+      color: var(--cyan);
+      box-shadow: 0 0 90px rgba(117, 233, 255, 0.22);
+    }
+
+    @keyframes pulse {
+      from { transform: translateY(0); filter: brightness(0.95); }
+      to { transform: translateY(-8px); filter: brightness(1.18); }
+    }
+
+    .flow-line {
+      position: absolute;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--green), transparent);
+      opacity: 0.72;
+      transform-origin: left center;
+    }
+    .l1 { width: 260px; left: 280px; top: 190px; transform: rotate(20deg); }
+    .l2 { width: 240px; right: 290px; top: 180px; transform: rotate(160deg); }
+    .l3 { width: 250px; left: 306px; bottom: 190px; transform: rotate(-20deg); }
+    .l4 { width: 250px; right: 316px; bottom: 180px; transform: rotate(200deg); }
+
+    .metrics {
+      padding: 42px 42px 34px;
+      display: grid;
+      gap: 22px;
+    }
+
+    .metric {
+      display: grid;
+      grid-template-columns: 170px 1fr;
+      gap: 22px;
+      align-items: baseline;
+      padding-bottom: 22px;
+      border-bottom: 1px solid rgba(211, 232, 190, 0.16);
+    }
+
+    .metric b {
+      color: var(--amber);
+      font-family: var(--serif);
+      font-size: 52px;
+      letter-spacing: -0.05em;
+      font-weight: 500;
+    }
+
+    .metric span {
+      color: var(--ink);
+      font-size: 25px;
+      line-height: 1.18;
+    }
+
+    .browser {
+      position: absolute;
+      left: 86px;
+      top: 172px;
+      right: 86px;
+      bottom: 120px;
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 32px;
+    }
+
+    .browser-window {
+      position: relative;
+      overflow: hidden;
+      border-radius: 18px;
+      border: 1px solid rgba(117, 233, 255, 0.38);
+      background: #091511;
+      box-shadow: 0 42px 130px rgba(0,0,0,0.5);
+    }
+
+    .chrome-bar {
+      height: 56px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 22px;
+      background: rgba(255,255,255,0.07);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .dot { width: 13px; height: 13px; border-radius: 50%; background: var(--red); }
+    .dot:nth-child(2) { background: var(--amber); }
+    .dot:nth-child(3) { background: var(--green); }
+    .url {
+      margin-left: 10px;
+      padding: 11px 16px;
+      flex: 1;
+      border-radius: 999px;
+      color: var(--muted);
+      font: 14px/1 var(--mono);
+      background: rgba(0,0,0,0.25);
+    }
+
+    .web-content {
+      position: absolute;
+      inset: 56px 0 0;
+      padding: 32px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      animation: scroll-page 4.2s ease 7.2s both;
+    }
+
+    @keyframes scroll-page {
+      from { transform: translateY(0); }
+      to { transform: translateY(-182px); }
+    }
+
+    .card {
+      min-height: 146px;
+      border: 1px solid rgba(184,255,116,0.18);
+      background: linear-gradient(160deg, rgba(184,255,116,0.1), rgba(255,255,255,0.025));
+      padding: 18px;
+      font: 15px/1.35 var(--mono);
+      color: var(--muted);
+    }
+
+    .card strong { color: var(--ink); display: block; margin-bottom: 8px; font-size: 20px; }
+
+    .browser-copy {
+      padding: 44px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .browser-copy h2, .final h2 {
+      margin: 0 0 24px;
+      font-family: var(--serif);
+      font-size: 76px;
+      line-height: 0.95;
+      letter-spacing: -0.055em;
+      font-weight: 500;
+    }
+
+    .browser-copy p, .final p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 30px;
+      line-height: 1.28;
+    }
+
+    .evidence-stack {
+      position: absolute;
+      inset: 160px 82px 122px;
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 36px;
+    }
+
+    .report-card {
+      padding: 42px;
+    }
+
+    .report-card h3 {
+      margin: 0 0 28px;
+      font: 22px/1 var(--mono);
+      color: var(--cyan);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .quote {
+      border-left: 3px solid var(--green);
+      padding-left: 22px;
+      font-family: var(--serif);
+      font-size: 38px;
+      line-height: 1.16;
+    }
+
+    .verdict {
+      display: grid;
+      gap: 20px;
+      padding: 42px;
+    }
+
+    .check {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      font-size: 31px;
+      padding: 20px 0;
+      border-bottom: 1px solid rgba(211, 232, 190, 0.15);
+    }
+
+    .check::before {
+      content: "PASS";
+      color: #07110f;
+      background: var(--green);
+      padding: 9px 12px;
+      font: 16px/1 var(--mono);
+      border-radius: 4px;
+    }
+
+    .final {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 0 210px;
+    }
+
+    .final h2 { font-size: 104px; }
+    .final .tag { margin-bottom: 30px; }
+    .footer {
+      position: absolute;
+      left: 82px;
+      right: 82px;
+      bottom: 48px;
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font: 17px/1 var(--mono);
+      z-index: 8;
+    }
+
+    .progress {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      height: 5px;
+      width: 100%;
+      background: rgba(255,255,255,0.08);
+      z-index: 9;
+    }
+
+    .progress::after {
+      content: "";
+      display: block;
+      height: 100%;
+      width: 100%;
+      transform-origin: left center;
+      background: linear-gradient(90deg, var(--green), var(--cyan), var(--amber));
+      animation: progress 15s linear forwards;
+    }
+
+    @keyframes progress {
+      from { transform: scaleX(0); }
+      to { transform: scaleX(1); }
+    }
+  </style>
+</head>
+<body>
+  <main class="stage" data-duration="15">
+    <div class="brand"><i class="brand-mark"></i> InsightSwarm</div>
+    <div class="timecode">00:00 / 00:15</div>
+
+    <section class="scene scene-1">
+      <div class="headline">让复杂调研<br />从搜索变成<strong>协作</strong></div>
+      <div class="subline">共享存储驱动的多 Agent 情报研究系统，从公开信息采集到证据审查与报告交付。</div>
+      <div class="question-card">
+        <div class="label">Live Question</div>
+        <p>为什么 2026 年中国航空公司燃油费屡次上调？</p>
+      </div>
+    </section>
+
+    <section class="scene scene-2">
+      <div class="workbench">
+        <div class="panel agent-map">
+          <div class="store">Task<br />Message<br />Artifact<br />Evidence</div>
+          <div class="flow-line l1"></div>
+          <div class="flow-line l2"></div>
+          <div class="flow-line l3"></div>
+          <div class="flow-line l4"></div>
+          <div class="node n1">Researcher<span>自主检索、评估来源、发布 raw source</span></div>
+          <div class="node n2">Extractor<span>从原始文档生成 citation / evidence</span></div>
+          <div class="node n3">Critic<span>审查 evidence bundle，触发补证或 pass</span></div>
+          <div class="node n4">Writer<span>只在 delivery gate 打开后交付报告</span></div>
+        </div>
+        <div class="panel metrics">
+          <div class="metric"><b>5</b><span>独立角色通过共享工作台异步协作</span></div>
+          <div class="metric"><b>9</b><span>结构化 evidence 在真实任务中通过审查</span></div>
+          <div class="metric"><b>Trace</b><span>每轮工具调用、证据与决策可追踪</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="scene scene-3">
+      <div class="browser">
+        <div class="browser-window">
+          <div class="chrome-bar">
+            <i class="dot"></i><i class="dot"></i><i class="dot"></i>
+            <div class="url">https://dynamic-site.example/pricing</div>
+          </div>
+          <div class="web-content">
+            <div class="card"><strong>page_state()</strong>DOM / title / interactables</div>
+            <div class="card"><strong>scroll()</strong>lazy content unlocked</div>
+            <div class="card"><strong>visible_text()</strong>17k chars captured</div>
+            <div class="card"><strong>CDP</strong>614k HTML scanned</div>
+            <div class="card"><strong>2k+</strong>clickable elements mapped</div>
+            <div class="card"><strong>Human Gate</strong>login / payment / submit blocked</div>
+            <div class="card"><strong>publish</strong>raw source to Extractor</div>
+            <div class="card"><strong>repair</strong>Critic asks targeted evidence</div>
+            <div class="card"><strong>report</strong>auditable answer delivered</div>
+          </div>
+        </div>
+        <div class="panel browser-copy">
+          <h2>复杂网页，<br />不再是断点。</h2>
+          <p>静态抓取失败时，BrowserAgent 升级到真实浏览器/CDP/code session：打开页面、滚动、点击、读取可见文本，并拦截高风险操作。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="scene scene-4">
+      <div class="evidence-stack">
+        <div class="panel report-card">
+          <h3>Evidence-first Delivery</h3>
+          <div class="quote">“先有 citation，再有 evidence；先过 Critic，再交付报告。”</div>
+        </div>
+        <div class="panel verdict">
+          <div class="check">来源覆盖关键因果链</div>
+          <div class="check">证据充分性通过审查</div>
+          <div class="check">报告带引用、可审计、可复盘</div>
+        </div>
+      </div>
+      <div class="final">
+        <div>
+          <div class="tag">Shared-store Multi-Agent Runtime</div>
+          <h2>把调研小组装进一个可追踪系统。</h2>
+          <p>InsightSwarm：从开放问题到结构化情报报告的 15 秒缩影。</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="footer">
+      <span>Researcher · Extractor · Critic · BrowserAgent · Writer</span>
+      <span>15s promo composition</span>
+    </div>
+    <div class="progress"></div>
+  </main>
+
+  <script>
+    const start = performance.now();
+    const timecode = document.querySelector(".timecode");
+    function tick(now) {
+      const elapsed = Math.min(15, (now - start) / 1000);
+      timecode.textContent = `00:${String(Math.floor(elapsed)).padStart(2, "0")} / 00:15`;
+      if (elapsed < 15) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>
