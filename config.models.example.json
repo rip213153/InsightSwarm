@@ -4,6 +4,7 @@
       "type": "openai_compatible",
       "base_url": "https://api.example.com/v1",
       "api_key_env": "MODEL_API_KEY",
+      "timeout_seconds": 180,
       "models": {
         "text": "text-model-name",
         "vision": "vision-model-name"
@@ -13,6 +14,7 @@
       "type": "openai_compatible",
       "base_url": "https://api.example.com/v1",
       "api_key_env": "FAST_MODEL_API_KEY",
+      "timeout_seconds": 180,
       "models": {
         "text": "fast-text-model-name"
       }
@@ -21,6 +23,7 @@
       "type": "openai_compatible",
       "base_url": "https://api.example.com/v1",
       "api_key_env": "STRONG_MODEL_API_KEY",
+      "timeout_seconds": 180,
       "models": {
         "text": "strong-text-model-name"
       }

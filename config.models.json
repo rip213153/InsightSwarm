@@ -1,45 +1,88 @@
 {
   "providers": {
-    "default": {
+    "lead_model": {
       "type": "openai_compatible",
       "base_url": "https://api.siliconflow.cn/v1",
-      "api_key_env": "SILICONFLOW_API_KEY",
+      "api_key_env": "SILICONFLOW_LEAD_KEY",
+      "timeout_seconds": 180,
       "models": {
-        "text": "deepseek-ai/DeepSeek-V3.2",
-        "vision": "deepseek-ai/DeepSeek-V3.2"
+        "text": "deepseek-ai/DeepSeek-V4-Flash"
+      }
+    },
+    "researcher_model": {
+      "type": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key_env": "SILICONFLOW_RESEARCHER_KEY",
+      "timeout_seconds": 180,
+      "models": {
+        "text": "deepseek-ai/DeepSeek-V4-Flash"
+      }
+    },
+    "extractor_model": {
+      "type": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key_env": "SILICONFLOW_EXTRACTOR_KEY",
+      "timeout_seconds": 180,
+      "models": {
+        "text": "deepseek-ai/DeepSeek-V4-Flash"
+      }
+    },
+    "critic_model": {
+      "type": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key_env": "SILICONFLOW_CRITIC_KEY",
+      "timeout_seconds": 180,
+      "models": {
+        "text": "deepseek-ai/DeepSeek-V4-Flash"
+      }
+    },
+    "writer_model": {
+      "type": "openai_compatible",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key_env": "SILICONFLOW_WRITER_KEY",
+      "timeout_seconds": 180,
+      "models": {
+        "text": "deepseek-ai/DeepSeek-V4-Flash"
+      }
+    },
+    "vision_model": {
+      "type": "openai_compatible",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "timeout_seconds": 180,
+      "models": {
+        "vision": "qwen3.5-omni-plus-2026-03-15"
       }
     }
   },
   "agents": {
-    "default": {
-      "provider": "default",
-      "capability": "text"
-    },
     "lead": {
-      "provider": "default"
+      "provider": "lead_model"
     },
     "researcher": {
-      "provider": "default"
+      "provider": "researcher_model"
     },
     "extractor": {
-      "provider": "default"
+      "provider": "extractor_model"
     },
     "critic": {
-      "provider": "default"
+      "provider": "critic_model"
     },
     "writer": {
-      "provider": "default"
-    },
-    "vision": {
-      "provider": "default",
-      "capability": "vision"
-    },
-    "browser": {
-      "provider": "default",
-      "capability": "vision"
+      "provider": "writer_model"
     },
     "judge": {
-      "provider": "default"
+      "provider": "critic_model"
+    },
+    "browser": {
+      "provider": "researcher_model"
+    },
+    "vision": {
+      "provider": "vision_model",
+      "capability": "vision"
+    },
+    "default": {
+      "provider": "researcher_model"
     }
   }
 }

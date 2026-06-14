@@ -84,6 +84,22 @@ class RuntimeState:
     model_registry: ModelRegistry | None = None
 
 
+class BrowserCompositeModelClient:
+    """Text-first browser client with optional vision support."""
+
+    def __init__(self, *, text_client: Any, vision_client: Any | None = None):
+        self.text_client = text_client
+        self.vision_client = vision_client or text_client
+        self.provider = getattr(text_client, "provider", "browser_text")
+        self.model = getattr(text_client, "model", "browser_text")
+
+    def complete(self, *args: Any, **kwargs: Any) -> Any:
+        return self.text_client.complete(*args, **kwargs)
+
+    def analyze_image(self, *args: Any, **kwargs: Any) -> Any:
+        return self.vision_client.analyze_image(*args, **kwargs)
+
+
 def run_objective(
     store: Store,
     question: str,
@@ -109,7 +125,7 @@ def run_objective(
         board_store=BoardStore(store),
         last_progress_at=time.monotonic(),
         model_client=model_client,
-        browser_model_client=browser_model_client,
+        browser_model_client=browser_model_client or _browser_model(model_registry),
         model_registry=model_registry,
     )
     state.task_store.recover_expired_leases(run_id)
@@ -163,12 +179,13 @@ def create_and_run_objective(
         if model_config_path
         else None
     )
-    browser_model_client = model_registry.for_agent("vision", capability="vision") if model_registry is not None else None
+    vision_model_client = model_registry.for_agent("vision", capability="vision") if model_registry is not None else None
+    browser_model_client = _browser_model(model_registry)
     user_input_summaries = ingest_user_input_files(
         store,
         run_id,
         file_paths=input_files,
-        vision_model_client=browser_model_client,
+        vision_model_client=vision_model_client,
     )
     metadata = {
         "query": query,
@@ -228,7 +245,7 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
                 state.run_id,
                 stop_event,
                 poll_interval=0.05,
-                model_client=state.browser_model_client or _agent_model(state, "browser", capability="vision"),
+                model_client=state.browser_model_client or _browser_model(state.model_registry),
                 trace_path=state.step_trace_path,
             ),
             daemon=True,
@@ -282,6 +299,15 @@ def _agent_model(state: RuntimeState, role: str, *, capability: str = "text") ->
     if state.model_registry is not None:
         return state.model_registry.for_agent(role, capability=capability)
     return state.model_client
+
+
+def _browser_model(model_registry: ModelRegistry | None) -> Any | None:
+    if model_registry is None:
+        return None
+    return BrowserCompositeModelClient(
+        text_client=model_registry.for_agent("browser", capability="text"),
+        vision_client=model_registry.for_agent("vision", capability="vision"),
+    )
 
 
 def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Event) -> None:

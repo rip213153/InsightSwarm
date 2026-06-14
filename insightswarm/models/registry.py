@@ -22,6 +22,7 @@ class ProviderConfig:
     base_url: str | None = None
     api_key_env: str | None = None
     models: dict[str, str] = field(default_factory=dict)
+    timeout_seconds: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ def _coerce_model_config(data: dict[str, Any], *, source: str) -> ModelConfig:
             base_url=str(raw["base_url"]).rstrip("/") if raw.get("base_url") else None,
             api_key_env=str(raw["api_key_env"]) if raw.get("api_key_env") else None,
             models={str(k): str(v) for k, v in models.items()},
+            timeout_seconds=float(raw.get("timeout_seconds") or 60.0),
         )
 
     agents: dict[str, AgentModelConfig] = {}
@@ -188,4 +190,5 @@ class ModelRegistry:
             model=model,
             base_url=provider.base_url,
             api_key_env=provider.api_key_env or "OPENAI_API_KEY",
+            timeout_seconds=provider.timeout_seconds,
         )

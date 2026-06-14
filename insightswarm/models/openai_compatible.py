@@ -45,11 +45,13 @@ class OpenAICompatibleClient:
         *,
         base_url: str,
         api_key_env: str,
+        timeout_seconds: float = 60.0,
     ):
         self.provider = provider
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
+        self.timeout_seconds = timeout_seconds
 
     def complete(
         self,
@@ -130,7 +132,7 @@ class OpenAICompatibleClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")

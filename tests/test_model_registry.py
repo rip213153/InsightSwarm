@@ -20,6 +20,7 @@ def _write_config(path):
                         "type": "openai_compatible",
                         "base_url": "https://strong.example.com/v1",
                         "api_key_env": "STRONG_MODEL_API_KEY",
+                        "timeout_seconds": 180,
                         "models": {"text": "strong-model"},
                     },
                     "fast": {
@@ -47,6 +48,7 @@ def test_model_config_loads_providers_and_agents(tmp_path):
     config = load_model_config(path)
 
     assert config.providers["strong"].base_url == "https://strong.example.com/v1"
+    assert config.providers["strong"].timeout_seconds == 180
     assert config.agents["researcher"].provider == "fast"
     assert config.agents["default"].provider == "strong"
 
@@ -65,6 +67,7 @@ def test_registry_builds_agent_clients_and_inherits_default(tmp_path):
     assert researcher.model == "fast-model"
     assert critic.provider == "strong"
     assert critic.model == "strong-model"
+    assert critic.timeout_seconds == 180
     assert vision.model == "vision-model"
 
 
