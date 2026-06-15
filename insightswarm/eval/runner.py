@@ -68,6 +68,8 @@ def build_default_swarm_runner(
     model_config_path: str | Path | None = None,
     max_steps: int = 12,
     max_runtime_seconds: float = 1800.0,
+    browser_backend: str | None = None,
+    browser_cdp_url: str | None = None,
 ) -> SwarmRunner:
     """Production swarm runner: one ``create_and_run_objective`` per epoch."""
     from insightswarm.objective_runtime import create_and_run_objective
@@ -82,6 +84,8 @@ def build_default_swarm_runner(
             artifact_dir=artifact_dir,
             max_steps=max_steps,
             max_runtime_seconds=max_runtime_seconds,
+            browser_backend=browser_backend,
+            browser_cdp_url=browser_cdp_url,
             input_files=list(case.input_files) or None,
         )
 
@@ -128,8 +132,6 @@ def run_eval(
     )
 
     for case in cases:
-        overall_scores: list[float] = []
-        grounded_ratios: list[float] = []
         for epoch_idx in range(repeat):
             outcome = _run_one_epoch(
                 store=store,
@@ -138,43 +140,108 @@ def run_eval(
                 swarm_runner=swarm_runner,
                 judge_client=judge_client,
             )
-            epoch_id = eval_store.record_epoch(
-                eval_run_id=eval_run_id,
-                case_id=outcome.case_id,
-                epoch_idx=outcome.epoch_idx,
-                swarm_run_id=outcome.swarm_run_id or None,
-                result_type=outcome.result_type,
-                score_overall=outcome.score_overall,
-                score_dims=outcome.score_dims,
-                citation_summary=outcome.citation_summary,
-                grounded_ratio=outcome.grounded_ratio,
-                latency_ms=outcome.latency_ms,
-                token_total=outcome.token_total,
-                status=outcome.status,
-                error=outcome.error,
-                judge_rationale=outcome.judge_rationale,
-            )
-            if outcome.citation_results:
-                eval_store.record_citation_checks(epoch_id, outcome.citation_results)
-            overall_scores.append(outcome.score_overall)
-            grounded_ratios.append(outcome.grounded_ratio)
+            _record_epoch(eval_store, eval_run_id, outcome)
 
-        agg = summarize(overall_scores)
-        mean_grounded = sum(grounded_ratios) / len(grounded_ratios) if grounded_ratios else 0.0
-        eval_store.upsert_case_agg(
-            eval_run_id=eval_run_id,
-            case_id=case.case_id,
-            n_epochs=agg.n,
-            mean=agg.mean,
-            std=agg.std,
-            stderr=agg.stderr,
-            min_score=agg.min_score,
-            max_score=agg.max_score,
-            mean_grounded_ratio=round(mean_grounded, 4),
-        )
+        _recompute_case_agg(eval_store, eval_run_id, case.case_id)
 
     eval_store.finish_eval_run(eval_run_id)
     return eval_run_id
+
+
+def resume_eval(
+    *,
+    store: Store,
+    eval_store: EvalStore,
+    eval_run_id: str,
+    cases_dir: str | Path,
+    swarm_runner: SwarmRunner,
+    judge_client: Any,
+    suite: str | None = None,
+    difficulty: str | None = None,
+    case_ids: list[str] | None = None,
+) -> str:
+    """Resume an interrupted eval run by filling missing case/epoch rows."""
+    eval_run = eval_store.get_eval_run(eval_run_id)
+    if eval_run is None:
+        raise ValueError(f"eval run not found: {eval_run_id}")
+    repeat = max(1, int(eval_run.get("repeat_n") or 1))
+    cases = load_cases(cases_dir, suite=suite or eval_run.get("suite"), difficulty=difficulty)
+    if case_ids:
+        wanted = set(case_ids)
+        cases = [case for case in cases if case.case_id in wanted]
+    if not cases:
+        raise ValueError("no eval cases selected")
+
+    existing = {
+        (str(row["case_id"]), int(row["epoch_idx"]))
+        for row in eval_store.list_epochs(eval_run_id)
+    }
+
+    for case in cases:
+        for epoch_idx in range(repeat):
+            key = (case.case_id, epoch_idx)
+            if key in existing:
+                continue
+            outcome = _run_one_epoch(
+                store=store,
+                case=case,
+                epoch_idx=epoch_idx,
+                swarm_runner=swarm_runner,
+                judge_client=judge_client,
+            )
+            _record_epoch(eval_store, eval_run_id, outcome)
+            existing.add(key)
+        _recompute_case_agg(eval_store, eval_run_id, case.case_id)
+
+    expected = {(case.case_id, idx) for case in cases for idx in range(repeat)}
+    status = "done" if expected.issubset(existing) else "running"
+    if status == "done":
+        eval_store.finish_eval_run(eval_run_id)
+    return eval_run_id
+
+
+def _record_epoch(eval_store: EvalStore, eval_run_id: str, outcome: EpochOutcome) -> str:
+    epoch_id = eval_store.record_epoch(
+        eval_run_id=eval_run_id,
+        case_id=outcome.case_id,
+        epoch_idx=outcome.epoch_idx,
+        swarm_run_id=outcome.swarm_run_id or None,
+        result_type=outcome.result_type,
+        score_overall=outcome.score_overall,
+        score_dims=outcome.score_dims,
+        citation_summary=outcome.citation_summary,
+        grounded_ratio=outcome.grounded_ratio,
+        latency_ms=outcome.latency_ms,
+        token_total=outcome.token_total,
+        status=outcome.status,
+        error=outcome.error,
+        judge_rationale=outcome.judge_rationale,
+    )
+    if outcome.citation_results:
+        eval_store.record_citation_checks(epoch_id, outcome.citation_results)
+    return epoch_id
+
+
+def _recompute_case_agg(eval_store: EvalStore, eval_run_id: str, case_id: str) -> None:
+    rows = [
+        row for row in eval_store.list_epochs(eval_run_id)
+        if str(row["case_id"]) == case_id
+    ]
+    scores = [float(row["score_overall"] or 0.0) for row in rows]
+    grounded = [float(row["grounded_ratio"] or 0.0) for row in rows]
+    agg = summarize(scores)
+    mean_grounded = sum(grounded) / len(grounded) if grounded else 0.0
+    eval_store.upsert_case_agg(
+        eval_run_id=eval_run_id,
+        case_id=case_id,
+        n_epochs=agg.n,
+        mean=agg.mean,
+        std=agg.std,
+        stderr=agg.stderr,
+        min_score=agg.min_score,
+        max_score=agg.max_score,
+        mean_grounded_ratio=round(mean_grounded, 4),
+    )
 
 
 def _run_one_epoch(

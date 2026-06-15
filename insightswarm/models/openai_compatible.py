@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import socket
@@ -145,6 +146,12 @@ class OpenAICompatibleClient:
             return self._error_result(f"OpenAI-compatible API request failed: {exc.reason}", started)
         except (TimeoutError, socket.timeout) as exc:
             return self._error_result(f"OpenAI-compatible API request timed out: {exc}", started)
+        except http.client.IncompleteRead as exc:
+            return self._error_result(f"OpenAI-compatible API response incomplete: {exc}", started)
+        except (ConnectionResetError, OSError) as exc:
+            return self._error_result(f"OpenAI-compatible API connection failed: {exc}", started)
+        except json.JSONDecodeError as exc:
+            return self._error_result(f"OpenAI-compatible API returned invalid JSON: {exc}", started)
         latency_ms = int((time.perf_counter() - started) * 1000)
         choice = (raw.get("choices") or [{}])[0]
         message = choice.get("message") or {}

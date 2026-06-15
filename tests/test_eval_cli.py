@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from insightswarm.cli import main
+from insightswarm.cli import build_parser, main
 from insightswarm.eval.store import EvalStore
 
 
@@ -62,6 +62,18 @@ def test_eval_summary_json(tmp_path, capsys):
     assert payload["run"]["eval_run_id"] == eval_run_id
     assert payload["suite_mean"] == 0.8
     assert payload["epoch_count"] == 1
+
+
+def test_browser_backend_defaults_to_visible_for_cli_entries():
+    parser = build_parser()
+
+    ask_args = parser.parse_args(["run", "ask", "hello"])
+    eval_run_args = parser.parse_args(["eval", "run"])
+    eval_resume_args = parser.parse_args(["eval", "resume", "evalrun_123"])
+
+    assert ask_args.browser_backend == "visible"
+    assert eval_run_args.browser_backend == "visible"
+    assert eval_resume_args.browser_backend == "visible"
 
 
 def test_eval_compare_json(tmp_path, capsys):

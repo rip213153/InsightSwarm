@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_ask.add_argument("--max-drain-seconds", type=float, default=900.0)
     run_ask.add_argument("--quality-mode", default="production", choices=["production", "test"])
     run_ask.add_argument("--search-provider", default="tavily")
-    run_ask.add_argument("--browser-backend", default=None)
+    run_ask.add_argument("--browser-backend", default="visible")
     run_ask.add_argument("--browser-cdp-url", default=None)
     run_ask.add_argument("--input-file", action="append", default=[], help="Attach an image, audio, or other local file as user-provided run context.")
     run_ask.add_argument("--json", action="store_true")
@@ -59,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument("--judge-provider", default=None)
     eval_run.add_argument("--max-steps", type=int, default=12)
     eval_run.add_argument("--max-runtime-seconds", type=float, default=1800.0)
+    eval_run.add_argument("--browser-backend", default="visible")
+    eval_run.add_argument("--browser-cdp-url", default=None)
     eval_run.add_argument("--notes", default=None)
     eval_run.add_argument("--json", action="store_true")
 
@@ -66,6 +68,20 @@ def build_parser() -> argparse.ArgumentParser:
     eval_summary.add_argument("eval_run_id")
     eval_summary.add_argument("--eval-db-path", default=str(Path(".insightswarm") / "eval.db"))
     eval_summary.add_argument("--json", action="store_true")
+
+    eval_resume = eval_sub.add_parser("resume")
+    eval_resume.add_argument("eval_run_id")
+    eval_resume.add_argument("--cases-dir", default=str(Path("evals") / "cases"))
+    eval_resume.add_argument("--eval-db-path", default=str(Path(".insightswarm") / "eval.db"))
+    eval_resume.add_argument("--suite", default=None)
+    eval_resume.add_argument("--difficulty", choices=["light", "heavy"], default=None)
+    eval_resume.add_argument("--case-id", action="append", default=[])
+    eval_resume.add_argument("--judge-provider", default=None)
+    eval_resume.add_argument("--max-steps", type=int, default=12)
+    eval_resume.add_argument("--max-runtime-seconds", type=float, default=1800.0)
+    eval_resume.add_argument("--browser-backend", default="visible")
+    eval_resume.add_argument("--browser-cdp-url", default=None)
+    eval_resume.add_argument("--json", action="store_true")
 
     eval_compare = eval_sub.add_parser("compare")
     eval_compare.add_argument("baseline_eval_run_id")
@@ -169,18 +185,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _handle_eval(args: argparse.Namespace, settings: object, store: Store) -> int:
-    from insightswarm.eval.runner import build_default_swarm_runner, run_eval
+    from insightswarm.eval.runner import build_default_swarm_runner, resume_eval, run_eval
     from insightswarm.eval.stats import compare_case
     from insightswarm.eval.store import EvalStore
 
     eval_store = EvalStore(args.eval_db_path)
 
     if args.action == "run":
-        judge_provider = args.judge_provider or settings.model_provider
-        judge_client = build_model_client(
-            judge_provider,
-            model_config_path=str(settings.model_config_path) if settings.model_config_path else None,
-        )
+        judge_client = _build_eval_judge_client(args, settings)
         swarm_runner = build_default_swarm_runner(
             store,
             artifact_dir=settings.artifact_dir,
@@ -188,6 +200,8 @@ def _handle_eval(args: argparse.Namespace, settings: object, store: Store) -> in
             model_config_path=settings.model_config_path,
             max_steps=args.max_steps,
             max_runtime_seconds=args.max_runtime_seconds,
+            browser_backend=args.browser_backend,
+            browser_cdp_url=args.browser_cdp_url,
         )
         eval_run_id = run_eval(
             store=store,
@@ -207,6 +221,37 @@ def _handle_eval(args: argparse.Namespace, settings: object, store: Store) -> in
             print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         else:
             print(f"eval run complete: {eval_run_id}")
+            _print_eval_summary(payload)
+        return 0
+
+    if args.action == "resume":
+        judge_client = _build_eval_judge_client(args, settings)
+        swarm_runner = build_default_swarm_runner(
+            store,
+            artifact_dir=settings.artifact_dir,
+            model_provider=settings.model_provider,
+            model_config_path=settings.model_config_path,
+            max_steps=args.max_steps,
+            max_runtime_seconds=args.max_runtime_seconds,
+            browser_backend=args.browser_backend,
+            browser_cdp_url=args.browser_cdp_url,
+        )
+        eval_run_id = resume_eval(
+            store=store,
+            eval_store=eval_store,
+            eval_run_id=args.eval_run_id,
+            cases_dir=args.cases_dir,
+            swarm_runner=swarm_runner,
+            judge_client=judge_client,
+            suite=args.suite,
+            difficulty=args.difficulty,
+            case_ids=args.case_id or None,
+        )
+        payload = _eval_summary_payload(eval_store, eval_run_id)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            print(f"eval run resumed: {eval_run_id}")
             _print_eval_summary(payload)
         return 0
 
@@ -261,6 +306,20 @@ def _handle_eval(args: argparse.Namespace, settings: object, store: Store) -> in
         return 0
 
     raise AssertionError("unreachable")
+
+
+def _build_eval_judge_client(args: argparse.Namespace, settings: object) -> object:
+    from insightswarm.models.registry import ModelRegistry
+
+    model_config_path = str(settings.model_config_path) if settings.model_config_path else None
+    if getattr(args, "judge_provider", None):
+        return build_model_client(
+            args.judge_provider,
+            model_config_path=model_config_path,
+        )
+    if model_config_path:
+        return ModelRegistry.from_file(model_config_path).for_agent("judge")
+    return build_model_client(settings.model_provider)
 
 
 def _eval_summary_payload(eval_store: object, eval_run_id: str) -> dict:

@@ -157,7 +157,7 @@ def create_and_run_objective(
     max_drain_seconds: float = 900.0,
     quality_mode: str = "production",
     search_provider: str = "tavily",
-    browser_backend: str | None = None,
+    browser_backend: str | None = "visible",
     browser_cdp_url: str | None = None,
     input_files: list[str] | None = None,
     **_: Any,
