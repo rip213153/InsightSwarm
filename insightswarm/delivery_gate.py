@@ -175,7 +175,7 @@ def _reconcile_passed_conflicts(store: Store, run_id: str) -> None:
         if message.from_role != "critic":
             continue
         payload = dict(message.payload or {})
-        if payload.get("verdict") != "pass" and payload.get("kind") != "pass":
+        if payload.get("verdict") not in {"pass", "pass_with_caveats"} and payload.get("kind") not in {"pass", "pass_with_caveats"}:
             continue
         evidence_ids = [str(value) for value in list(payload.get("evidence_ids") or []) if str(value)]
         issue_keys = [str(payload.get("issue_key") or "").strip()]
@@ -213,7 +213,7 @@ def _latest_critic_pass(store: Store, run_id: str) -> dict[str, object] | None:
             continue
         payload = dict(message.payload or {})
         verdict = str(payload.get("verdict") or payload.get("kind") or "")
-        if verdict == "pass":
+        if verdict in {"pass", "pass_with_caveats"}:
             return {
                 "created_at": message.created_at,
                 "evidence_ids": [str(value) for value in list(payload.get("evidence_ids") or []) if str(value)],

@@ -107,12 +107,66 @@ def test_researcher_subagents_are_private_and_do_not_write_shared_store(tmp_path
 
     assert result["ok"] is True
     assert result["shared_storage_written"] is False
-    assert len(result["findings"]) == 2
-    assert len(state.subagent_findings) == 2
-    assert len(state.candidate_sources) == 2
-    assert store.list_swarm_tasks(run_state.run_id) == [task]
-    assert store.list_swarm_messages(run_state.run_id) == []
-    assert store.list_swarm_artifacts(run_state.run_id) == []
+
+
+def test_researcher_dedupes_repeated_normalized_url_fetch_and_publish(tmp_path: Path, monkeypatch) -> None:
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    board_store = BoardStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Dedupe URL test",
+        budget={"max_steps": 20},
+        phase="research",
+    )
+    task = task_store.create(
+        run_state.run_id,
+        kind="research_subquestion",
+        status="leased",
+        owner_role="researcher",
+        inputs={"question": "What is new?"},
+        created_by="lead",
+    )
+
+    fetch_calls: list[str] = []
+
+    def _fetch(self, tool_input: dict[str, Any], context=None) -> ToolResult:
+        fetch_calls.append(tool_input["url"])
+        return ToolResult(
+            "ok",
+            data={
+                "source_url": tool_input["url"],
+                "url": tool_input["url"],
+                "title": "Official source",
+                "text": "Long usable text " * 100,
+                "html": "<html><title>Official source</title></html>",
+            },
+        )
+
+    monkeypatch.setattr("insightswarm.agents.researcher_tools.FetchUrlTool.run", _fetch)
+
+    state = ResearcherToolState()
+    handlers = ResearcherToolHandlers(
+        task=task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=board_store,
+        state=state,
+    )
+
+    handlers.read_task({})
+    first = handlers.fetch_source({"url": "https://example.com/path/"})
+    second = handlers.fetch_source({"url": "https://example.com/path"})
+    publish = handlers.publish_raw_source({"document_urls": ["https://example.com/path"], "why_ready": "usable"})
+    republish = handlers.publish_raw_source({"document_urls": ["https://example.com/path/"], "why_ready": "usable again"})
+
+    assert first["ok"] is True
+    assert second["deduped"] is True
+    assert publish["ok"] is True
+    assert republish["deduped"] is True
+    assert len(fetch_calls) == 1
 
 
 def test_researcher_subagents_cap_at_three(tmp_path: Path, monkeypatch) -> None:

@@ -22,15 +22,13 @@ Use tools:
 - `finish_writing`: only after publishing, if needed.
 
 Private State should include useful compact fields:
-{
-  "thesis_draft": "core judgment",
-  "answer_frame": "angle used to answer the user's question",
-  "thematic_clusters": [],
-  "contradictions": [],
-  "confidence_assessment": {},
-  "source_limits": "source strengths and weaknesses",
-  "gaps": []
-}
+- `thesis_draft`: core judgment.
+- `answer_frame`: angle used to answer the user's question.
+- `thematic_clusters`: evidence grouped by theme.
+- `contradictions`: conflicts or tensions that should not be hidden.
+- `confidence_assessment`: confidence by key judgment with reasons.
+- `source_limits`: source strengths and weaknesses.
+- `gaps`: missing information to disclose.
 
 The final report object must use this shape:
 {
@@ -64,23 +62,4 @@ The final report object must use this shape:
     }
   ],
   "sources": ["evidence_id or source_url"]
-}
-
-Return JSON only:
-{
-  "assistant_text": "Briefly state your OODA posture and why the tool call is appropriate.",
-  "private_state": {
-    "thesis_draft": "string",
-    "answer_frame": "string",
-    "thematic_clusters": [],
-    "contradictions": [],
-    "confidence_assessment": {},
-    "source_limits": "string",
-    "gaps": []
-  },
-  "tool_call": {
-    "name": "one exact tool name from tool_specs",
-    "input": {}
-  },
-  "stop_reason": "string|null"
 }

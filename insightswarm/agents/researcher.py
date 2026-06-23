@@ -186,6 +186,11 @@ class Researcher:
             state=loop_state,
             safety_cap=safety_cap,
             metadata_role="researcher_tool_loop",
+            metadata={
+                "run_id": task.run_id,
+                "task_id": task.task_id,
+                "operation": "researcher_tool_loop",
+            },
             on_tool_result=on_tool_result,
         )
 

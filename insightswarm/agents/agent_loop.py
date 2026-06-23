@@ -7,6 +7,19 @@ from typing import Any, Callable
 from insightswarm.agents.tool_executor import ToolExecutor
 
 
+AGENT_LOOP_CONTRACT = """\
+Shared Agent Loop Contract:
+- The runtime provides tool_specs, private_state, minimal_event_memory, and recent_tool_transcript every round.
+- Return one JSON object with assistant_text, private_state, tool_call, and stop_reason.
+- While the task is active, choose exactly one tool_call. The tool name must exactly match tool_specs and the input must be an object.
+- Use the role's finish_* tool for complete/blocked/no-productive-tool states. Return tool_call=null only if no finish tool exists.
+- The runtime validates tool names and required inputs. Invalid or missing tool calls are rejected; recovery guidance may be supplied on the next round.
+- Agents collaborate only through their exposed tools and shared stores. Do not directly call another agent's execution path.
+- Formal Evidence can only be created by Extractor tools. Final reports can only be published by Writer tools.
+- Private state is scratchpad continuity, not shared memory. Write only concise public observations through explicit shared-store tools.
+"""
+
+
 @dataclass
 class AgentLoopState:
     private_state: dict[str, Any] = field(default_factory=dict)
@@ -28,6 +41,7 @@ def run_agent_loop(
     state: AgentLoopState | None = None,
     safety_cap: int = 50,
     metadata_role: str = "agent_tool_loop",
+    metadata: dict[str, Any] | None = None,
     on_tool_result: Callable[[int, dict[str, Any], dict[str, Any], AgentLoopState], None] | None = None,
 ) -> tuple[list[dict[str, Any]], AgentLoopState]:
     loop_state = state or AgentLoopState()
@@ -42,6 +56,7 @@ def run_agent_loop(
             tool_specs=tool_specs,
             state=loop_state,
             metadata_role=metadata_role,
+            metadata=metadata,
         )
         tool_call = _parse_tool_call(turn, tool_specs)
         loop_state.private_state = _next_private_state(turn)
@@ -131,6 +146,7 @@ def _call_model(
     tool_specs: list[dict[str, Any]],
     state: AgentLoopState,
     metadata_role: str,
+    metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if model_client is None:
         return {
@@ -139,6 +155,7 @@ def _call_model(
             "stop_reason": None,
         }
 
+    composed_system_prompt = _compose_system_prompt(system_prompt)
     payload = {
         "tool_specs": tool_specs,
         "private_state": state.private_state,
@@ -147,15 +164,20 @@ def _call_model(
     }
     if state.tool_contract_recovery:
         payload["tool_contract_recovery"] = state.tool_contract_recovery
+    call_metadata = {
+        **dict(metadata or {}),
+        "role": metadata_role,
+        "operation": str((metadata or {}).get("operation") or metadata_role),
+    }
     result = model_client.complete(
         [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": composed_system_prompt},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True)},
         ],
         response_format={"type": "json_object"},
         temperature=0.2,
         max_tokens=2200,
-        metadata={"role": metadata_role},
+        metadata=call_metadata,
     )
     if str(getattr(result, "status", "ok")) != "ok":
         return {
@@ -172,6 +194,13 @@ def _call_model(
         return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         return {"assistant_text": text[:1000], "tool_call": None, "stop_reason": "invalid_json"}
+
+
+def _compose_system_prompt(role_prompt: str) -> str:
+    role_prompt = str(role_prompt).strip()
+    if "Shared Agent Loop Contract:" in role_prompt:
+        return role_prompt
+    return f"{AGENT_LOOP_CONTRACT}\n\nRole Prompt:\n{role_prompt}"
 
 
 def _failure_kind(status: str, reason: str) -> str:

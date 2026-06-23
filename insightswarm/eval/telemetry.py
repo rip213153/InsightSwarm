@@ -53,7 +53,7 @@ def _usage_int(usage: dict[str, Any], *keys: str) -> int:
 
 
 def collect_run_telemetry(store: Store, run_id: str) -> RunTelemetry:
-    """Aggregate model_calls, citations, and evidence for one swarm run."""
+    """Aggregate model calls and swarm evidence for one run."""
     telemetry = RunTelemetry(run_id=run_id)
 
     rows = store.conn.execute(
@@ -79,8 +79,8 @@ def collect_run_telemetry(store: Store, run_id: str) -> RunTelemetry:
     if telemetry.token_total == 0:
         telemetry.token_total = telemetry.token_prompt + telemetry.token_completion
 
-    telemetry.citation_count = len(store.list_citations(run_id))
     telemetry.evidence_count = len(store.list_swarm_evidence(run_id))
+    telemetry.citation_count = telemetry.evidence_count
     telemetry.raw_document_count = sum(
         1 for artifact in store.list_swarm_artifacts(run_id) if artifact.type == "raw_document"
     )
@@ -116,10 +116,8 @@ def collect_source_corpus(store: Store, run_id: str) -> dict[str, str]:
 def collect_report_citations(store: Store, run_id: str) -> list[dict[str, Any]]:
     """Return citation rows as plain dicts for quote verification and judging.
 
-    Current swarm runs write quote-backed evidence to ``swarm_evidence`` and
-    citation payloads to ``swarm_artifacts``. Older/legacy paths used the
-    top-level ``citations`` table. Prefer the current evidence table, then fall
-    back to legacy citations for backwards compatibility.
+    Current runs write quote-backed citations as ``swarm_evidence``. The old
+    top-level ``citations`` table was removed with the legacy runtime.
     """
     citations: list[dict[str, Any]] = []
     for evidence in store.list_swarm_evidence(run_id):
@@ -130,18 +128,6 @@ def collect_report_citations(store: Store, run_id: str) -> list[dict[str, Any]]:
                 "claim": "",
                 "confidence": evidence.confidence,
                 "evidence_id": evidence.evidence_id,
-            }
-        )
-    if citations:
-        return citations
-
-    for row in store.list_citations(run_id):
-        citations.append(
-            {
-                "source_url": str(row["source_url"] or ""),
-                "quote": str(row["quote"] or ""),
-                "claim": str(row["claim"] or ""),
-                "confidence": row["confidence"],
             }
         )
     return citations

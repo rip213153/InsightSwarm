@@ -33,19 +33,24 @@ python -m venv .venv
 pip install -e ".[browser]"
 ```
 
-Copy `.env.example` to `.env` or set environment variables directly.
-Copy `config.models.example.json` to `config.models.json`, then edit only the
-provider `base_url`, `api_key_env`, and model names for your OpenAI-compatible
-endpoint.
+Copy `.env.example` to `.env` or set environment variables directly. The
+interactive launcher can run from environment variables without a local model
+config file.
 
 ```powershell
-$env:MODEL_API_KEY="..."
 $env:TAVILY_API_KEY="..."
-$env:INSIGHTSWARM_MODEL_CONFIG="config.models.json"
-$env:INSIGHTSWARM_MODEL_PROVIDER="default"
+$env:DASHSCOPE_API_KEY="..."
+$env:INSIGHTSWARM_QWEN_TEXT_MODEL="qwen3.7-plus"
 ```
 
-Optional:
+Optional file-based routing:
+
+```powershell
+Copy-Item config.models.example.json config.models.json
+$env:INSIGHTSWARM_MODEL_CONFIG="config.models.json"
+```
+
+Optional acquisition tools:
 
 ```powershell
 $env:FIRECRAWL_API_KEY="..."
@@ -64,26 +69,29 @@ $env:PYTHONUTF8="1"
 $env:PYTHONIOENCODING="utf-8"
 ```
 
-Run a real research question:
+Start the interactive runtime:
 
 ```powershell
-python -m insightswarm.cli --model-provider default run ask "为什么2026年中国航空公司燃油费屡次上调" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
+python main.py
 ```
 
-Use the visible browser path for hard acquisition:
+Inside the prompt:
+
+```text
+InsightSwarm> /model qwen3.7-plus
+InsightSwarm> /ask 为什么2026年中国航空公司燃油费屡次上调？
+InsightSwarm> /ask --image C:\path\to\image.png 我想了解这张图片里的网站
+InsightSwarm> /exit
+```
+
+You can still run one question directly:
 
 ```powershell
-$env:INSIGHTSWARM_BROWSER_BACKEND="visible"
-$env:INSIGHTSWARM_BROWSER_PROFILE_ROOT="E:\code\InsightSwarm\.tmp\browser-profiles"
-
-python -m insightswarm.cli --model-provider default run ask "了解这个复杂网站" --browser-backend visible --search-provider tavily
+python main.py "为什么2026年中国航空公司燃油费屡次上调？"
 ```
 
-Attach local multimodal input, such as an image, as user-provided context:
-
-```powershell
-python -m insightswarm.cli --model-provider default run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
-```
+Each completed run prints a compact metrics line with elapsed minutes, token
+usage, model call count, evidence count, and raw document count.
 
 Outputs are written locally under:
 
@@ -101,14 +109,6 @@ Run unit tests:
 
 ```powershell
 python -m pytest -q
-```
-
-Acceptance tests require real model credentials and scripted fixtures.
-
-Run them explicitly when credentials are configured:
-
-```powershell
-python -m pytest -q tests/acceptance
 ```
 
 ## Documentation

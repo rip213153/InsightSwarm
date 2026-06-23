@@ -12,9 +12,6 @@ class _Store:
     def __init__(self):
         self.conn = _Conn()
 
-    def list_citations(self, run_id):
-        return []
-
     def list_swarm_evidence(self, run_id):
         return []
 

@@ -336,6 +336,7 @@ class ResearcherToolState:
     fetched_documents: list[dict[str, Any]] = field(default_factory=list)
     acquisition_failures: list[dict[str, Any]] = field(default_factory=list)
     subagent_findings: list[dict[str, Any]] = field(default_factory=list)
+    seen_urls: dict[str, dict[str, str]] = field(default_factory=dict)
     created_task_ids: list[str] = field(default_factory=list)
     created_message_ids: list[str] = field(default_factory=list)
     created_artifact_ids: list[str] = field(default_factory=list)
@@ -443,10 +444,31 @@ class ResearcherToolHandlers:
         url = _safe_text(tool_input.get("url"))
         if not url:
             return {"ok": False, "error": "fetch_source requires url"}
+        normalized_url = _normalize_document_url(url)
+        seen = self.state.seen_urls.get(normalized_url)
+        if seen and seen.get("status") == "fetched_success":
+            existing = _find_fetched_document(self.state.fetched_documents, normalized_url)
+            if existing is not None:
+                return {
+                    "ok": True,
+                    "document": _visible_document(existing),
+                    "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
+                    "acquisition_pressure": _acquisition_pressure(self.state, self.task),
+                    "deduped": True,
+                }
+        if seen and seen.get("status") == "fetched_failed":
+            return {
+                "ok": False,
+                "error": f"fetch already failed for {normalized_url}",
+                "document": {"url": url, "usable": False, "usability_reason": seen.get("reason") or "fetch_failed"},
+                "acquisition_pressure": _acquisition_pressure(self.state, self.task),
+                "deduped": True,
+            }
         result = FetchUrlTool().run({"url": url}, ToolContext(run_id=self.task.run_id, task_id=self.task.task_id))
         if not result.ok:
             document = {"url": url, "usable": False, "usability_reason": result.error or "fetch_failed"}
             self._record_acquisition_failure(url=url, tool="fetch_source", reason=document["usability_reason"], document=document)
+            self.state.seen_urls[normalized_url] = {"status": "fetched_failed", "reason": document["usability_reason"], "tool": "fetch_source"}
             return {"ok": False, "error": result.error, "document": document, "acquisition_pressure": _acquisition_pressure(self.state, self.task)}
         document = dict(result.data)
         page_profile = _classify_page(document, url)
@@ -465,8 +487,14 @@ class ResearcherToolHandlers:
             "page_profile": page_profile,
             "researcher_status": "pending" if visible_document["usable"] else "rejected",
             "decision_reason": "" if visible_document["usable"] else visible_document["usability_reason"],
+            "normalized_url": normalized_url,
         }
         self.state.fetched_documents.append(document_record)
+        self.state.seen_urls[normalized_url] = {
+            "status": "fetched_success" if visible_document["usable"] else "fetched_failed",
+            "reason": visible_document["usability_reason"],
+            "tool": "fetch_source",
+        }
         if not visible_document["usable"]:
             self._record_acquisition_failure(url=url, tool="fetch_source", reason=visible_document["usability_reason"], document=visible_document)
         return {
@@ -482,10 +510,23 @@ class ResearcherToolHandlers:
         url = _safe_text(tool_input.get("url"))
         if not url:
             return {"ok": False, "error": "firecrawl_source requires url"}
+        normalized_url = _normalize_document_url(url)
+        seen = self.state.seen_urls.get(normalized_url)
+        if seen and seen.get("status") == "fetched_success":
+            existing = _find_fetched_document(self.state.fetched_documents, normalized_url)
+            if existing is not None:
+                return {
+                    "ok": True,
+                    "document": _visible_document(existing),
+                    "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
+                    "acquisition_pressure": _acquisition_pressure(self.state, self.task),
+                    "deduped": True,
+                }
         result = FirecrawlScrapeTool().run({"url": url}, ToolContext(run_id=self.task.run_id, task_id=self.task.task_id))
         if not result.ok:
             document = {"url": url, "usable": False, "usability_reason": result.error or "firecrawl_failed"}
             self._record_acquisition_failure(url=url, tool="firecrawl_source", reason=document["usability_reason"], document=document)
+            self.state.seen_urls[normalized_url] = {"status": "fetched_failed", "reason": document["usability_reason"], "tool": "firecrawl_source"}
             return {"ok": False, "error": result.error, "document": document, "acquisition_pressure": _acquisition_pressure(self.state, self.task)}
         document = dict(result.data)
         page_profile = _classify_page(document, url)
@@ -506,8 +547,14 @@ class ResearcherToolHandlers:
             "researcher_status": "pending" if visible_document["usable"] else "rejected",
             "decision_reason": _safe_text(tool_input.get("why_firecrawl_needed")),
             "extract_goal": _safe_text(tool_input.get("extract_goal")),
+            "normalized_url": normalized_url,
         }
         self.state.fetched_documents.append(document_record)
+        self.state.seen_urls[normalized_url] = {
+            "status": "fetched_success" if visible_document["usable"] else "fetched_failed",
+            "reason": visible_document["usability_reason"],
+            "tool": "firecrawl_source",
+        }
         if not visible_document["usable"]:
             self._record_acquisition_failure(url=url, tool="firecrawl_source", reason=visible_document["usability_reason"], document=visible_document)
         return {
@@ -587,7 +634,29 @@ class ResearcherToolHandlers:
         requested_urls = {_safe_text(url) for url in list(tool_input.get("document_urls") or [])}
         documents = _select_publishable_documents(self.state.fetched_documents, requested_urls)
         if not documents:
-            return {"ok": False, "error": "no usable fetched document is available"}
+            already_decided = _matching_decided_documents(self.state.fetched_documents, requested_urls)
+            return {
+                "ok": False,
+                "error": "no usable fetched document is available",
+                "deduped": bool(already_decided),
+                "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
+            }
+        existing_published = {
+            _normalize_document_url(_document_url(artifact_payload))
+            for artifact_payload in (_artifact_payloads_for_run(self.artifact_store, self.task.run_id))
+        }
+        for document in documents:
+            if _normalize_document_url(_document_url(document)) in existing_published:
+                document["researcher_status"] = "published_duplicate"
+                document["decision_reason"] = "source URL was already published in this run"
+        documents = [document for document in documents if _normalize_document_url(_document_url(document)) not in existing_published]
+        if not documents:
+            return {
+                "ok": False,
+                "error": "all requested sources were already published",
+                "deduped": True,
+                "unresolved_publishable_count": len(_unresolved_publishable_documents(self.state.fetched_documents)),
+            }
         artifact_ids: list[str] = []
         task_ids: list[str] = []
         batch_id = new_id("batch")
@@ -642,6 +711,7 @@ class ResearcherToolHandlers:
             self.state.created_message_ids.append(message.message_id or "")
             document["researcher_status"] = "published"
             document["decision_reason"] = _safe_text(tool_input.get("why_ready"))
+            self.state.seen_urls[_normalize_document_url(_document_url(document))] = {"status": "published", "reason": _safe_text(tool_input.get("why_ready")), "tool": "publish_raw_source"}
             _close_same_url_documents(
                 self.state.fetched_documents,
                 document,
@@ -937,6 +1007,12 @@ def _run_research_subagent(*, parent_task: Task, subtask: dict[str, Any], model_
         state=loop_state,
         safety_cap=8,
         metadata_role="research_subagent_loop",
+        metadata={
+            "run_id": parent_task.run_id,
+            "task_id": parent_task.task_id,
+            "operation": "research_subagent_loop",
+            "subtask_index": int(subtask.get("index") or 0),
+        },
     )
     finding = state.finding or _fallback_subagent_finding(state=state, terminal_reason=final_state.terminal_reason)
     finding["rounds"] = len(trace)
@@ -1272,6 +1348,18 @@ def _matching_decidable_documents(documents: list[dict[str, Any]], url: str) -> 
     ]
 
 
+def _matching_decided_documents(documents: list[dict[str, Any]], requested_urls: set[str]) -> list[dict[str, Any]]:
+    normalized_requested_urls = {_normalize_document_url(item) for item in requested_urls if item}
+    if not normalized_requested_urls:
+        return []
+    return [
+        document
+        for document in documents
+        if _normalize_document_url(_document_url(document)) in normalized_requested_urls
+        and _safe_text(document.get("researcher_status")) in {"published", "published_duplicate", "rejected"}
+    ]
+
+
 def _close_same_url_documents(documents: list[dict[str, Any]], published_document: dict[str, Any], *, status: str, reason: str) -> None:
     normalized_url = _normalize_document_url(_document_url(published_document))
     for document in documents:
@@ -1305,6 +1393,18 @@ def _document_url(document: dict[str, Any]) -> str:
     return _safe_text(document.get("url") or document.get("source_url"))
 
 
+def _visible_document(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "url": _safe_text(document.get("url")),
+        "title": _safe_text(document.get("title")),
+        "usable": bool(document.get("usable")),
+        "usability_reason": _safe_text(document.get("usability_reason")),
+        "page_type": _safe_text(document.get("page_type")),
+        "information_density": _safe_text(document.get("information_density")),
+        "text_preview": _safe_text(document.get("text_preview")),
+    }
+
+
 def _normalize_document_url(url: str) -> str:
     parsed = urlparse(_safe_text(url))
     if not parsed.scheme or not parsed.netloc:
@@ -1312,6 +1412,18 @@ def _normalize_document_url(url: str) -> str:
     path = parsed.path.rstrip("/") or "/"
     query = f"?{parsed.query}" if parsed.query else ""
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}{query}"
+
+
+def _artifact_payloads_for_run(artifact_store: ArtifactStore, run_id: str) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for artifact in artifact_store.store.list_swarm_artifacts(run_id, source_task_id=None):
+        if artifact.type != "raw_document":
+            continue
+        try:
+            payloads.append(artifact_store.read_payload(artifact.artifact_id))
+        except Exception:
+            continue
+    return payloads
 
 
 def _publishable_document_score(document: dict[str, Any]) -> int:

@@ -285,7 +285,7 @@ def test_browser_execute_code_blocks_third_identical_snippet(tmp_path: Path) -> 
     assert "repeated_browser_code_blocked" in blocked["error"]
 
 
-def test_browser_authorization_allows_retrying_high_risk_navigation(tmp_path: Path) -> None:
+def test_human_authorization_allows_retrying_high_risk_navigation(tmp_path: Path) -> None:
     store = _build_store(tmp_path)
     task_store = TaskStore(store)
     mailbox = Mailbox(store)

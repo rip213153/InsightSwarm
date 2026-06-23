@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from insightswarm.agents.browser_agent import HumanAuthorizationRequired
@@ -10,6 +11,7 @@ from insightswarm.authorization_flow import pending_authorization_requests, writ
 from insightswarm.config import load_settings
 from insightswarm.db.migrations import init_db
 from insightswarm.db.store import Store
+from insightswarm.eval.telemetry import collect_run_telemetry
 from insightswarm.models.router import build_model_client
 from insightswarm.objective_runtime import ObjectiveBudget, create_and_run_objective, run_objective
 from insightswarm.util import new_id
@@ -115,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         query = args.query or args.question
         if not query:
             raise SystemExit("run ask requires a question")
+        started_at = time.perf_counter()
         try:
             result = create_and_run_objective(
                 store,
@@ -134,6 +137,13 @@ def main(argv: list[str] | None = None) -> int:
                 browser_cdp_url=args.browser_cdp_url,
                 input_files=args.input_file,
             )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                f"{exc}\n"
+                "Tip: config.models.json is local-only and ignored by git. "
+                "Copy config.models.example.json if you want file-based routing, "
+                "or use python main.py / .\\ask.ps1 for environment-based quick runs."
+            ) from exc
         except HumanAuthorizationRequired as exc:
             print(f"HumanAuthorizationRequired: {exc}", file=__import__("sys").stderr)
             raise
@@ -153,10 +163,12 @@ def main(argv: list[str] | None = None) -> int:
                     max_drain_seconds=args.max_drain_seconds,
                 )
                 payload = result.to_dict()
+        payload["run_metrics"] = _run_metrics_payload(store, payload["run_id"], elapsed_seconds=time.perf_counter() - started_at)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         else:
             print(payload["report"]["body"] if payload.get("report") else payload["result_type"])
+            _print_run_metrics(payload["run_metrics"])
         return 0 if payload["result_type"] != "report_blocked" else 2
 
     if args.resource == "run" and args.action == "smoke":
@@ -347,6 +359,28 @@ def _print_eval_summary(payload: dict) -> None:
             f"stderr={float(row['stderr'] or 0.0):.4f} "
             f"grounded={float(row['mean_grounded_ratio'] or 0.0):.4f}"
         )
+
+
+def _run_metrics_payload(store: Store, run_id: str, *, elapsed_seconds: float) -> dict:
+    telemetry = collect_run_telemetry(store, run_id)
+    metrics = telemetry.as_metrics()
+    metrics["elapsed_seconds"] = round(elapsed_seconds, 3)
+    metrics["elapsed_minutes"] = round(elapsed_seconds / 60.0, 2)
+    return metrics
+
+
+def _print_run_metrics(metrics: dict) -> None:
+    print("")
+    print(
+        "Run metrics: "
+        f"{float(metrics.get('elapsed_minutes') or 0):.2f} min, "
+        f"tokens={int(metrics.get('token_total') or 0)} "
+        f"(prompt={int(metrics.get('token_prompt') or 0)}, completion={int(metrics.get('token_completion') or 0)}), "
+        f"model_calls={int(metrics.get('model_call_count') or 0)}, "
+        f"model_errors={int(metrics.get('model_error_count') or 0)}, "
+        f"evidence={int(metrics.get('evidence_count') or 0)}, "
+        f"raw_documents={int(metrics.get('raw_document_count') or 0)}"
+    )
 
 
 def _agg_by_case(eval_store: object, eval_run_id: str) -> dict[str, object]:

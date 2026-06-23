@@ -25,6 +25,8 @@ def build_tool_trace_callback(trace_path: Path | None, *, role: str, task: Task)
             "private_state": loop_state.private_state,
             "event_memory": loop_state.event_memory,
         }
+        if role == "critic":
+            record["critic_review_state"] = _critic_review_state(loop_state.private_state)
         with trace_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
@@ -67,4 +69,21 @@ def _summarize_tool_result(tool_result: dict[str, Any]) -> dict[str, Any]:
         summary["candidate_count"] = len(list(tool_result.get("candidates") or []))
     if "ranked_sources" in tool_result:
         summary["ranked_source_count"] = len(list(tool_result.get("ranked_sources") or []))
+    if isinstance(tool_result.get("review_basis"), dict):
+        summary["review_basis"] = tool_result["review_basis"]
+    if tool_result.get("missing_review_basis"):
+        summary["missing_review_basis"] = True
     return summary
+
+
+def _critic_review_state(private_state: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "review_focus",
+        "findings_so_far",
+        "open_questions",
+        "review_confidence",
+        "likely_disposition",
+        "review_basis",
+        "plan",
+    )
+    return {key: private_state.get(key) for key in keys if key in private_state}

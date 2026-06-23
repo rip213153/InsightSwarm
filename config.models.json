@@ -4,7 +4,6 @@
       "type": "openai_compatible",
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key_env": "SILICONFLOW_LEAD_KEY",
-      "timeout_seconds": 180,
       "models": {
         "text": "deepseek-ai/DeepSeek-V4-Flash"
       }
@@ -13,7 +12,6 @@
       "type": "openai_compatible",
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key_env": "SILICONFLOW_RESEARCHER_KEY",
-      "timeout_seconds": 180,
       "models": {
         "text": "deepseek-ai/DeepSeek-V4-Flash"
       }
@@ -22,7 +20,6 @@
       "type": "openai_compatible",
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key_env": "SILICONFLOW_EXTRACTOR_KEY",
-      "timeout_seconds": 180,
       "models": {
         "text": "deepseek-ai/DeepSeek-V4-Flash"
       }
@@ -31,7 +28,6 @@
       "type": "openai_compatible",
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key_env": "SILICONFLOW_CRITIC_KEY",
-      "timeout_seconds": 180,
       "models": {
         "text": "deepseek-ai/DeepSeek-V4-Flash"
       }
@@ -40,7 +36,6 @@
       "type": "openai_compatible",
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key_env": "SILICONFLOW_WRITER_KEY",
-      "timeout_seconds": 180,
       "models": {
         "text": "deepseek-ai/DeepSeek-V4-Flash"
       }
@@ -49,7 +44,6 @@
       "type": "openai_compatible",
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key_env": "DASHSCOPE_API_KEY",
-      "timeout_seconds": 180,
       "models": {
         "vision": "qwen3.5-omni-plus-2026-03-15"
       }
@@ -74,10 +68,11 @@
     "judge": {
       "provider": "critic_model"
     },
-    "browser": {
-      "provider": "researcher_model"
-    },
     "vision": {
+      "provider": "vision_model",
+      "capability": "vision"
+    },
+    "browser": {
       "provider": "vision_model",
       "capability": "vision"
     },

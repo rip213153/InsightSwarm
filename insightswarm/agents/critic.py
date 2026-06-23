@@ -69,7 +69,7 @@ class Critic:
         task: Task,
         *,
         model_client: object | None = None,
-        safety_cap: int = 20,
+        safety_cap: int = 5,
         on_tool_result: Any | None = None,
     ) -> list[dict[str, Any]]:
         tool_state = CriticToolState()
@@ -89,7 +89,7 @@ class Critic:
         task: Task,
         *,
         model_client: object | None = None,
-        safety_cap: int = 20,
+        safety_cap: int = 5,
         trace_path: Path | None = None,
     ) -> CriticResult:
         tool_state = CriticToolState()
@@ -163,6 +163,12 @@ class Critic:
             state=loop_state,
             safety_cap=safety_cap,
             metadata_role="critic_tool_loop",
+            metadata={
+                "run_id": task.run_id,
+                "task_id": task.task_id,
+                "operation": "critic_tool_loop",
+                "evidence_count": len(list(task.inputs.get("evidence_ids") or [])),
+            },
             on_tool_result=on_tool_result,
         )
 

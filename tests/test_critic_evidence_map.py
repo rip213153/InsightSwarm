@@ -23,6 +23,8 @@ def _record_evidence(
     source_url: str,
     claim: str,
     quote: str,
+    freshness: str | None = None,
+    confidence: float = 0.9,
 ) -> str:
     artifact_store = ArtifactStore(store)
     board_store = BoardStore(store)
@@ -37,8 +39,8 @@ def _record_evidence(
         artifact_id=citation.artifact_id or "",
         source_url=source_url,
         quote=quote,
-        freshness=None,
-        confidence=0.9,
+        freshness=freshness,
+        confidence=confidence,
         qa_state="ready",
     )
     board_store.record_evidence(
@@ -106,8 +108,225 @@ def test_critic_evidence_map_summarizes_large_bundle_without_writing(tmp_path: P
     assert result["ok"] is True
     assert result["evidence_count"] == 10
     assert result["source_count"] == 2
-    assert result["coverage"]["primary_sources"] == 1
-    assert result["coverage"]["independent_sources"] == 2
+    assert result["coverage"]["source_count"] == 2
+    assert result["coverage"]["largest_source_share"] == 0.6
+    assert "source_role_hint_counts" in result["coverage"]
+    assert "source_category" not in result["sources"][0]
+    assert "source_role_hint" in result["sources"][0]
+    dominant_sources = [source for source in result["sources"] if "source_dominates_bundle" in source["risk_flags"]]
+    assert len(dominant_sources) == 1
+    assert "missing_freshness" in dominant_sources[0]["risk_flags"]
+    assert all("non_primary_source" not in source["risk_flags"] for source in result["sources"])
     assert len(result["sources"][0]["representative_quotes"]) <= 2
     assert validation == {"ok": True, "passed": True, "must_fix": []}
     assert len(store.list_swarm_messages(run_state.run_id)) == before_messages
+
+
+def test_critic_repair_budget_blocks_after_one_review_repair(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    board_store = BoardStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Budget test",
+        budget={"max_steps": 12},
+        phase="review",
+    )
+    review_task = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="leased",
+        owner_role="critic",
+        inputs={"evidence_scope": "run", "evidence_ids": [], "question": run_state.objective},
+        created_by="test",
+    )
+    handlers = CriticToolHandlers(
+        task=review_task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=board_store,
+        state=CriticToolState(),
+    )
+    review_basis = {
+        "quote_integrity": "fail",
+        "claim_alignment": "unclear",
+        "coverage_for_review_scope": "missing",
+        "source_concentration": "unclear",
+        "freshness_fit": "missing",
+        "tensions": "none",
+        "review_disposition": "repair",
+        "disposition_reason": "No usable evidence exists.",
+        "must_fix": ["need quote-backed evidence covering the core question"],
+    }
+
+    first = handlers.request_repair(
+        {
+            "targeted_query": "find quote-backed source covering the core question",
+            "must_fix": ["need quote-backed evidence covering the core question"],
+            "why_current_evidence_failed": "nothing usable",
+            "review_basis": review_basis,
+        }
+    )
+    second = handlers.request_repair(
+        {
+            "targeted_query": "find another quote-backed source covering the core question",
+            "must_fix": ["need another quote-backed source covering the core question"],
+            "why_current_evidence_failed": "still nothing usable",
+            "review_basis": review_basis,
+        }
+    )
+
+    assert first["ok"] is True
+    assert first["repair_created"] is True
+    repair_task = store.get_swarm_task(first["repair_task_id"])
+    assert repair_task.inputs["review_basis"]["review_disposition"] == "repair"
+    assert second["ok"] is False
+    assert "budget" in second["error"]
+
+
+def test_critic_repair_requires_review_basis(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    board_store = BoardStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Missing review basis test",
+        budget={"max_steps": 12},
+        phase="review",
+    )
+    review_task = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="leased",
+        owner_role="critic",
+        inputs={"evidence_scope": "run", "evidence_ids": [], "question": run_state.objective},
+        created_by="test",
+    )
+    handlers = CriticToolHandlers(
+        task=review_task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=board_store,
+        state=CriticToolState(),
+    )
+
+    result = handlers.request_repair(
+        {
+            "targeted_query": "find quote-backed source covering the core question",
+            "must_fix": ["need quote-backed evidence covering the core question"],
+            "why_current_evidence_failed": "nothing usable",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["missing_review_basis"] is True
+    assert store.list_swarm_tasks(run_state.run_id) == [review_task]
+
+
+def test_critic_pass_with_caveats_surfaces_verdict(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    board_store = BoardStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Pass caveat test",
+        budget={"max_steps": 12},
+        phase="review",
+    )
+    review_task = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="leased",
+        owner_role="critic",
+        inputs={"evidence_scope": "run", "evidence_ids": [], "question": run_state.objective},
+        created_by="test",
+    )
+    handlers = CriticToolHandlers(
+        task=review_task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=board_store,
+        state=CriticToolState(),
+    )
+
+    result = handlers.mark_review_passed(
+        {
+            "reason": "usable but incomplete",
+            "verdict": "pass_with_caveats",
+            "caveats": ["needs future monitoring"],
+            "review_basis": {
+                "quote_integrity": "pass",
+                "claim_alignment": "aligned",
+                "coverage_for_review_scope": "partial",
+                "source_concentration": "unclear",
+                "freshness_fit": "unclear",
+                "tensions": "none",
+                "review_disposition": "pass_with_caveats",
+                "disposition_reason": "Usable but incomplete.",
+                "caveats": ["needs future monitoring"],
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert mailbox.inbox(run_state.run_id, role="lead")[-1].payload["verdict"] == "pass_with_caveats"
+
+
+def test_critic_terminal_tools_record_review_basis(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    board_store = BoardStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Review basis test",
+        budget={"max_steps": 12},
+        phase="review",
+    )
+    review_task = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="leased",
+        owner_role="critic",
+        inputs={"evidence_scope": "run", "evidence_ids": [], "question": run_state.objective},
+        created_by="test",
+    )
+    handlers = CriticToolHandlers(
+        task=review_task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=board_store,
+        state=CriticToolState(),
+    )
+    review_basis = {
+        "quote_integrity": "pass",
+        "claim_alignment": "aligned",
+        "coverage_for_review_scope": "partial",
+        "source_concentration": "single_source",
+        "freshness_fit": "missing",
+        "tensions": "none",
+        "review_disposition": "pass_with_caveats",
+        "disposition_reason": "Usable with freshness caveat.",
+        "caveats": ["freshness missing"],
+    }
+
+    result = handlers.mark_review_passed(
+        {
+            "reason": "usable with caveat",
+            "verdict": "pass_with_caveats",
+            "caveats": ["freshness missing"],
+            "review_basis": review_basis,
+        }
+    )
+
+    assert result["ok"] is True
+    payload = mailbox.inbox(run_state.run_id, role="lead")[-1].payload
+    assert payload["review_basis"]["review_disposition"] == "pass_with_caveats"
+    assert payload["review_basis"]["source_concentration"] == "single_source"

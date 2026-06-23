@@ -13,3 +13,4 @@ build/
 .env
 .env.*
 !.env.example
+config.models.json

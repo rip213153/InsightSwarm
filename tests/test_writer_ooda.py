@@ -149,6 +149,8 @@ def test_writer_ooda_model_publishes_analytic_report(tmp_path: Path) -> None:
     assert result is not None
     assert result.claimed_task_id == task.task_id
     assert [call["metadata"]["role"] for call in model.calls] == ["writer_tool_loop"] * 4
+    assert [call["metadata"]["run_id"] for call in model.calls] == [run_state.run_id] * 4
+    assert [call["metadata"]["task_id"] for call in model.calls] == [task.task_id] * 4
     assert "## Executive Summary" in body
     assert "## Key Judgments" in body
     assert "## Caveats" in body
@@ -178,3 +180,37 @@ def test_writer_does_not_run_before_delivery_gate(tmp_path: Path) -> None:
 
     assert WriterWorker(task_store, mailbox, artifact_store).run_once(run_state.run_id) is None
     assert store.list_swarm_artifacts(run_state.run_id) == []
+
+
+def test_writer_fallback_is_visible_and_downgraded(tmp_path: Path) -> None:
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Fallback writer",
+        budget={"max_steps": 12},
+        phase="delivery",
+        delivery_gate=True,
+    )
+    evidence_id = _seed_evidence(store, run_state.run_id)
+    task = task_store.create(
+        run_state.run_id,
+        kind="delivery_request",
+        status="pending",
+        owner_role="writer",
+        inputs={"question": run_state.objective, "report_kind": "report", "evidence_ids": [evidence_id]},
+        created_by="delivery_gate",
+    )
+
+    result = WriterWorker(task_store, mailbox, artifact_store).run_once(run_state.run_id)
+
+    artifacts = [artifact for artifact in store.list_swarm_artifacts(run_state.run_id) if artifact.source_task_id == task.task_id]
+    messages = [message for message in store.list_swarm_messages(run_state.run_id) if message.from_role == "writer"]
+    body = Path(artifacts[0].payload_ref).read_text(encoding="utf-8")
+
+    assert result is not None
+    assert artifacts[0].type == "report_partial"
+    assert "fallback report generated because WriterAgent did not publish" in body
+    assert messages[-1].payload["fallback"] is True
+    assert messages[-1].payload["fallback_reason"] == "writer_model_did_not_publish_report"

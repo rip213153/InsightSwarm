@@ -334,9 +334,19 @@ class WriterWorker:
                 state=loop_state,
                 safety_cap=8,
                 metadata_role="writer_tool_loop",
+                metadata={
+                    "run_id": task.run_id,
+                    "task_id": task.task_id,
+                    "operation": "writer_tool_loop",
+                    "frontier_hash": context["frontier_hash"],
+                },
             )
         if not state.created_artifact_ids:
-            artifact_id, message_id = self._publish_fallback_report(task, context)
+            artifact_id, message_id = self._publish_fallback_report(
+                task,
+                context,
+                reason="writer_model_did_not_publish_report",
+            )
             state.created_artifact_ids.append(artifact_id)
             state.created_message_ids.append(message_id)
         return WriterWorkResult(
@@ -345,20 +355,25 @@ class WriterWorker:
             created_message_ids=list(state.created_message_ids),
         )
 
-    def _publish_fallback_report(self, task: Task, context: dict[str, object]) -> tuple[str, str]:
+    def _publish_fallback_report(self, task: Task, context: dict[str, object], *, reason: str) -> tuple[str, str]:
         citations = list(context["citations"])
         report_kind = _normalize_report_kind(str(context["report_kind"] or "report"))
         if not citations:
             report_kind = "report_blocked"
-        elif bool(context["has_delivery_gap"]) or str(context["critic_verdict"] or "") != "pass":
+        elif report_kind == "report" or bool(context["has_delivery_gap"]) or str(context["critic_verdict"] or "") != "pass":
             report_kind = "report_partial"
-        body = _fallback_report_body(question=str(context["question"] or ""), citations=citations, report_kind=report_kind)
+        body = _fallback_report_body(
+            question=str(context["question"] or ""),
+            citations=citations,
+            report_kind=report_kind,
+            fallback_reason=reason,
+        )
         artifact = self.artifact_store.write_report(
             task.run_id,
             source_task_id=task.task_id,
             report_kind=report_kind,
             body=body,
-            summary=f"{report_kind} for {context['question']}",
+            summary=f"fallback {report_kind} for {context['question']}: {reason}",
         )
         message = self.mailbox.send(
             task.run_id,
@@ -373,6 +388,7 @@ class WriterWorker:
                 "frontier_hash": context["frontier_hash"],
                 "evidence_ids": list(context["evidence_ids"]),
                 "fallback": True,
+                "fallback_reason": reason,
             },
             related_task_id=task.task_id,
         )
@@ -431,7 +447,12 @@ def write_report(
             body = ""
 
     if not body:
-        body = _fallback_report_body(question=question, citations=citations, report_kind="report")
+        body = _fallback_report_body(
+            question=question,
+            citations=citations,
+            report_kind="report_partial" if citations else "report_blocked",
+            fallback_reason="legacy_writer_model_did_not_return_body",
+        )
 
     report_path = run_dir / "report.md"
     report_path.write_text(body, encoding="utf-8")
@@ -607,11 +628,15 @@ def _coverage_ok(body: str, citations: list[dict]) -> bool:
     return all(str(citation.get("source_url") or "") in body for citation in citations)
 
 
-def _fallback_report_body(*, question: str, citations: list[dict], report_kind: str) -> str:
+def _fallback_report_body(*, question: str, citations: list[dict], report_kind: str, fallback_reason: str) -> str:
+    notice = (
+        "This is a fallback report generated because WriterAgent did not publish "
+        f"a structured report. Fallback reason: {fallback_reason}."
+    )
     if not citations:
-        return f"# {question}\n\nNo citation-backed evidence is available, so a report cannot be delivered."
+        return f"# Blocked Report\n\n{notice}\n\nNo citation-backed evidence is available, so a report cannot be delivered."
     heading = "# Partial Report" if report_kind == "report_partial" else f"# {question}"
-    lines = [heading, "", "## Findings"]
+    lines = [heading, "", f"> {notice}", "", "## Findings"]
     for index, citation in enumerate(citations, start=1):
         source_url = citation.get("source_url") or ""
         quote = citation.get("quote") or ""

@@ -5,7 +5,6 @@ import os
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 from insightswarm.tools.core import ToolContext, ToolResult
@@ -19,23 +18,6 @@ class SearchTool:
         provider = str(tool_input.get("provider") or "tavily")
         query = str(tool_input.get("query") or "")
         limit = int(tool_input.get("limit") or 5)
-
-        payload = _fixture_payload()
-        if tool_input.get("repair_round"):
-            fixture_results = list(payload.get("repair_search_results") or [])
-        else:
-            fixture_results = list(payload.get("search_results") or [])
-        if fixture_results:
-            return ToolResult(
-                "ok",
-                data={
-                    "provider": "fixture",
-                    "status": "ok",
-                    "results": fixture_results[:limit],
-                },
-                diagnostics={"result_count": min(limit, len(fixture_results)), "fixture": True},
-                provenance={"tool": self.name, "provider": "fixture"},
-            )
 
         if provider != "tavily":
             return ToolResult(
@@ -100,12 +82,3 @@ class SearchTool:
             provenance={"tool": self.name, "provider": provider},
         )
 
-
-def _fixture_payload() -> dict[str, Any]:
-    fixture_name = os.getenv("INSIGHTSWARM_SCRIPTED_FIXTURE")
-    if not fixture_name:
-        return {}
-    fixture_path = Path(__file__).resolve().parent / "fixtures" / f"{fixture_name}.json"
-    if not fixture_path.exists():
-        return {}
-    return json.loads(fixture_path.read_text(encoding="utf-8"))

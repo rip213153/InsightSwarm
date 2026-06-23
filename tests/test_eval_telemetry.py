@@ -25,27 +25,14 @@ class _StoreWithSwarmEvidence:
             )
         ]
 
-    def list_citations(self, run_id: str):
-        raise AssertionError("legacy citations should not be read when swarm evidence exists")
 
-
-class _StoreWithLegacyCitations:
+class _StoreWithoutSwarmEvidence:
     def list_swarm_evidence(self, run_id: str):
+        assert run_id == "run_1"
         return []
 
-    def list_citations(self, run_id: str):
-        assert run_id == "run_1"
-        return [
-            {
-                "source_url": "https://example.com/legacy",
-                "quote": "legacy quote",
-                "claim": "legacy claim",
-                "confidence": 0.8,
-            }
-        ]
 
-
-def test_collect_report_citations_prefers_swarm_evidence():
+def test_collect_report_citations_reads_swarm_evidence():
     citations = collect_report_citations(_StoreWithSwarmEvidence(), "run_1")
 
     assert citations == [
@@ -55,18 +42,11 @@ def test_collect_report_citations_prefers_swarm_evidence():
             "claim": "",
             "confidence": 0.9,
             "evidence_id": "ev_1",
-        }
+        },
     ]
 
 
-def test_collect_report_citations_falls_back_to_legacy_rows():
-    citations = collect_report_citations(_StoreWithLegacyCitations(), "run_1")
+def test_collect_report_citations_does_not_fallback_to_legacy_rows():
+    citations = collect_report_citations(_StoreWithoutSwarmEvidence(), "run_1")
 
-    assert citations == [
-        {
-            "source_url": "https://example.com/legacy",
-            "quote": "legacy quote",
-            "claim": "legacy claim",
-            "confidence": 0.8,
-        }
-    ]
+    assert citations == []

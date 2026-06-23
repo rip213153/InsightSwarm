@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import html as html_lib
-import json
-import os
 import re
 import time
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 from insightswarm.tools.core import ToolContext, ToolResult
@@ -21,31 +18,6 @@ class FetchUrlTool:
         blocked = validate_public_http_url(url, context)
         if blocked:
             return blocked
-
-        payload = _fixture_payload()
-        if tool_input.get("repair_round"):
-            fixture_documents = list(payload.get("repair_documents") or [])
-        else:
-            fixture_documents = list(payload.get("documents") or [])
-        for document in fixture_documents:
-            if document.get("url") == url:
-                raw_html = str(document.get("html") or "")
-                text = str(document.get("text") or "")
-                if raw_html and not text:
-                    text = _clean_html(raw_html)["text"]
-                return ToolResult(
-                    "ok",
-                    data={
-                        "source_url": url,
-                        "fetcher": "fixture",
-                        "status": "ok",
-                        "text": text,
-                        "html": raw_html or f"<html><body>{text}</body></html>",
-                        "title": document.get("title") or _clean_html(raw_html or text)["title"],
-                        "metadata": {"fixture": True},
-                    },
-                    provenance={"tool": self.name, "fetcher": "fixture"},
-                )
 
         started = time.perf_counter()
         try:
@@ -73,17 +45,6 @@ class FetchUrlTool:
             },
             provenance={"tool": self.name, "fetcher": "urllib"},
         )
-
-
-def _fixture_payload() -> dict[str, Any]:
-    fixture_name = os.getenv("INSIGHTSWARM_SCRIPTED_FIXTURE")
-    if not fixture_name:
-        return {}
-    fixture_path = Path(__file__).resolve().parent / "fixtures" / f"{fixture_name}.json"
-    if not fixture_path.exists():
-        return {}
-    return json.loads(fixture_path.read_text(encoding="utf-8"))
-
 
 def _clean_html(raw_html: str) -> dict[str, str]:
     html = raw_html or ""

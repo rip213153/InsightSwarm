@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from insightswarm.schemas.swarm import Evidence, Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
@@ -12,6 +13,13 @@ from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskSto
 CRITIC_ROLE = "critic"
 RESEARCHER_ROLE = "researcher"
 DEFAULT_MAX_REPAIR_ATTEMPTS = 2
+DEFAULT_MAX_BLOCKING_REPAIRS_PER_RUN = 2
+DEFAULT_MAX_BLOCKING_REPAIRS_PER_REVIEW = 1
+
+REVIEW_BASIS_SCHEMA = {
+    "type": "object",
+    "description": "The structured review conclusion formed in Critic private OODA state before taking the terminal action.",
+}
 
 
 CRITIC_TOOLS = [
@@ -73,6 +81,7 @@ CRITIC_TOOLS = [
                 "must_fix": {"type": "array", "items": {"type": "string"}},
                 "preferred_source_type": {"type": "string"},
                 "why_current_evidence_failed": {"type": "string"},
+                "review_basis": REVIEW_BASIS_SCHEMA,
             },
             "required": ["targeted_query", "must_fix", "why_current_evidence_failed"],
         },
@@ -93,7 +102,7 @@ CRITIC_TOOLS = [
         "description": "Record an unresolved evidence conflict that should be surfaced rather than silently merged.",
         "input_schema": {
             "type": "object",
-            "properties": {"summary": {"type": "string"}, "conflicting_evidence_ids": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}},
+            "properties": {"summary": {"type": "string"}, "conflicting_evidence_ids": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}, "review_basis": REVIEW_BASIS_SCHEMA},
             "required": ["summary", "reason"],
         },
         "output_schema": {"type": "object", "properties": {"conflict_id": {"type": "string"}, "message_id": {"type": "string"}}},
@@ -101,10 +110,38 @@ CRITIC_TOOLS = [
     },
     {
         "name": "mark_review_passed",
-        "description": "Mark this evidence bundle as passing Critic review.",
-        "input_schema": {"type": "object", "properties": {"reason": {"type": "string"}, "confidence": {"type": "number"}}, "required": ["reason"]},
+        "description": "Mark this evidence bundle as passing Critic review. Use caveats for non-blocking weaknesses that should be disclosed in delivery rather than repaired.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"},
+                "confidence": {"type": "number"},
+                "verdict": {"type": "string", "enum": ["pass", "pass_with_caveats"]},
+                "caveats": {"type": "array", "items": {"type": "string"}},
+                "review_basis": REVIEW_BASIS_SCHEMA,
+            },
+            "required": ["reason"],
+        },
         "output_schema": {"type": "object", "properties": {"message_id": {"type": "string"}}},
         "side_effects": "writes critic pass response",
+    },
+    {
+        "name": "reject_direction",
+        "description": "Reject a weak research/source direction without creating a blocking repair. Bind the rejection to a direction, source path, or URL and explain why Researcher should avoid it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string"},
+                "source_url": {"type": "string"},
+                "reason": {"type": "string"},
+                "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "number"},
+                "review_basis": REVIEW_BASIS_SCHEMA,
+            },
+            "required": ["direction", "reason"],
+        },
+        "output_schema": {"type": "object", "properties": {"message_id": {"type": "string"}}},
+        "side_effects": "writes non-blocking direction rejection observation",
     },
     {
         "name": "finish_review",
@@ -158,6 +195,7 @@ class CriticToolHandlers:
             "request_repair": self._guard_after_repair("request_repair", self.request_repair),
             "record_conflict": self._guard_after_repair("record_conflict", self.record_conflict),
             "mark_review_passed": self._guard_after_repair("mark_review_passed", self.mark_review_passed),
+            "reject_direction": self._guard_after_repair("reject_direction", self.reject_direction),
             "finish_review": self.finish_review,
         }
 
@@ -197,6 +235,12 @@ class CriticToolHandlers:
             "evidence_bundle_key": self.task.inputs.get("evidence_bundle_key"),
             "repair_attempt": self.task.inputs.get("repair_attempt"),
             "max_repair_attempts": self.task.inputs.get("max_repair_attempts") or DEFAULT_MAX_REPAIR_ATTEMPTS,
+            "repair_budget": {
+                "blocking_repairs_used_for_run": self._blocking_repair_count_for_run(),
+                "max_blocking_repairs_per_run": DEFAULT_MAX_BLOCKING_REPAIRS_PER_RUN,
+                "blocking_repairs_used_for_review": self._blocking_repair_count_for_review(),
+                "max_blocking_repairs_per_review": DEFAULT_MAX_BLOCKING_REPAIRS_PER_REVIEW,
+            },
         }
 
     def read_evidence_bundle(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -214,26 +258,26 @@ class CriticToolHandlers:
             by_source.setdefault(_safe_text(item.get("source_url")) or "unknown", []).append(item)
 
         sources: list[dict[str, Any]] = []
-        primary_sources = 0
-        secondary_sources = 0
         forward_looking_claims = 0
         recommended_detail_reads: list[str] = []
+        source_role_hint_counts: dict[str, int] = {}
+        largest_source_share = 0.0
+        total_evidence = len(bundle)
         for source_url, items in sorted(by_source.items()):
             claims = [_safe_text(item.get("claim")) for item in items if _safe_text(item.get("claim"))]
             quotes = [_shorten(_safe_text(item.get("quote")), 220) for item in items if _safe_text(item.get("quote"))]
-            source_category = _source_category(source_url)
-            risk_flags = _source_risks(source_url, items)
-            if source_category == "primary_source":
-                primary_sources += 1
-            else:
-                secondary_sources += 1
+            source_role_hint = _source_role_hint(source_url)
+            risk_flags = _source_risks(source_url, items, total_evidence=total_evidence)
+            source_role_hint_counts[source_role_hint] = source_role_hint_counts.get(source_role_hint, 0) + 1
+            if total_evidence:
+                largest_source_share = max(largest_source_share, len(items) / total_evidence)
             forward_looking_claims += sum(1 for claim in claims if _looks_forward_looking(claim))
             if items:
                 recommended_detail_reads.append(str(items[0].get("evidence_id") or ""))
             sources.append(
                 {
                     "source_url": source_url,
-                    "source_category": source_category,
+                    "source_role_hint": source_role_hint,
                     "risk_flags": risk_flags,
                     "evidence_ids": [item.get("evidence_id") for item in items],
                     "evidence_count": len(items),
@@ -248,9 +292,9 @@ class CriticToolHandlers:
             "source_count": len(sources),
             "sources": sources,
             "coverage": {
-                "primary_sources": primary_sources,
-                "secondary_sources": secondary_sources,
-                "independent_sources": len(sources),
+                "source_role_hint_counts": source_role_hint_counts,
+                "largest_source_share": round(largest_source_share, 3),
+                "source_count": len(sources),
                 "forward_looking_claims": forward_looking_claims,
                 "ready_evidence": sum(1 for item in bundle if item.get("qa_state") == "ready"),
             },
@@ -305,6 +349,9 @@ class CriticToolHandlers:
     def request_repair(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         targeted_query = _safe_text(tool_input.get("targeted_query"))
         must_fix = [str(item).strip() for item in list(tool_input.get("must_fix") or []) if str(item).strip()]
+        review_basis = _review_basis(tool_input)
+        if not review_basis:
+            return _missing_review_basis("request_repair")
         issue_key = _stable_issue_key(targeted_query=targeted_query, must_fix=must_fix)
         repair_attempt = self._next_repair_attempt(issue_key)
         max_repair_attempts = int(self.task.inputs.get("max_repair_attempts") or DEFAULT_MAX_REPAIR_ATTEMPTS)
@@ -318,17 +365,33 @@ class CriticToolHandlers:
                 "active_repair_exists": True,
                 "issue_key": issue_key,
             }
-        if repair_attempt > max_repair_attempts:
-            exhausted = self.mailbox.send(
-                self.task.run_id,
-                from_role=CRITIC_ROLE,
-                to_role="lead",
-                message_type="observation",
-                payload={"kind": "repair_exhausted", "issue_key": issue_key, "targeted_query": targeted_query, "must_fix": must_fix, "repair_attempt": repair_attempt, "max_repair_attempts": max_repair_attempts},
-                related_task_id=self.task.task_id,
+        if self._blocking_repair_count_for_review() >= DEFAULT_MAX_BLOCKING_REPAIRS_PER_REVIEW:
+            return self._write_repair_exhausted(
+                issue_key=issue_key,
+                targeted_query=targeted_query,
+                must_fix=must_fix,
+                error="review blocking repair budget exhausted",
+                repair_attempt=repair_attempt,
+                max_repair_attempts=max_repair_attempts,
             )
-            self.state.created_message_ids.append(exhausted.message_id or "")
-            return {"ok": False, "terminal": False, "error": "repair budget exhausted", "message_id": exhausted.message_id, "issue_key": issue_key}
+        if self._blocking_repair_count_for_run() >= DEFAULT_MAX_BLOCKING_REPAIRS_PER_RUN:
+            return self._write_repair_exhausted(
+                issue_key=issue_key,
+                targeted_query=targeted_query,
+                must_fix=must_fix,
+                error="run blocking repair budget exhausted",
+                repair_attempt=repair_attempt,
+                max_repair_attempts=max_repair_attempts,
+            )
+        if repair_attempt > max_repair_attempts:
+            return self._write_repair_exhausted(
+                issue_key=issue_key,
+                targeted_query=targeted_query,
+                must_fix=must_fix,
+                error="issue repair budget exhausted",
+                repair_attempt=repair_attempt,
+                max_repair_attempts=max_repair_attempts,
+            )
 
         conflict = self.board_store.create_conflict(
             self.task.run_id,
@@ -337,7 +400,7 @@ class CriticToolHandlers:
             status="open",
             priority=self.task.priority,
             created_by=CRITIC_ROLE,
-            payload={"issue_key": issue_key, "evidence_ids": list(self.state.evidence_ids), "must_fix": must_fix, "why_current_evidence_failed": _safe_text(tool_input.get("why_current_evidence_failed"))},
+            payload={"issue_key": issue_key, "evidence_ids": list(self.state.evidence_ids), "must_fix": must_fix, "why_current_evidence_failed": _safe_text(tool_input.get("why_current_evidence_failed")), "review_basis": review_basis},
             dedupe_key=f"conflict:{issue_key}:{repair_attempt}",
         )
         repair_task = self.task_store.create(
@@ -353,6 +416,9 @@ class CriticToolHandlers:
                 "issue_key": issue_key,
                 "repair_attempt": repair_attempt,
                 "max_repair_attempts": max_repair_attempts,
+                "blocking_repair": True,
+                "origin_review_task_id": self.task.task_id,
+                "review_basis": review_basis,
             },
             priority=10,
             created_by=CRITIC_ROLE,
@@ -362,7 +428,7 @@ class CriticToolHandlers:
             from_role=CRITIC_ROLE,
             to_role=RESEARCHER_ROLE,
             message_type="request",
-            payload={"kind": "research_repair", "task_id": repair_task.task_id, "targeted_query": targeted_query, "must_fix": must_fix, "issue_key": issue_key, "repair_attempt": repair_attempt, "max_repair_attempts": max_repair_attempts},
+            payload={"kind": "research_repair", "task_id": repair_task.task_id, "targeted_query": targeted_query, "must_fix": must_fix, "issue_key": issue_key, "repair_attempt": repair_attempt, "max_repair_attempts": max_repair_attempts, "review_basis": review_basis},
             related_task_id=repair_task.task_id,
         )
         self.state.created_board_item_ids.append(conflict.item_id or "")
@@ -380,6 +446,9 @@ class CriticToolHandlers:
         }
 
     def record_conflict(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        review_basis = _review_basis(tool_input)
+        if not review_basis:
+            return _missing_review_basis("record_conflict")
         conflict = self.board_store.create_conflict(
             self.task.run_id,
             title=_safe_text(tool_input.get("summary")) or "Evidence conflict",
@@ -387,7 +456,7 @@ class CriticToolHandlers:
             status="open",
             priority=self.task.priority,
             created_by=CRITIC_ROLE,
-            payload={"reason": _safe_text(tool_input.get("reason")), "conflicting_evidence_ids": list(tool_input.get("conflicting_evidence_ids") or self.state.evidence_ids)},
+            payload={"reason": _safe_text(tool_input.get("reason")), "conflicting_evidence_ids": list(tool_input.get("conflicting_evidence_ids") or self.state.evidence_ids), "review_basis": review_basis},
             dedupe_key=f"conflict:{self.task.task_id}:{hashlib.sha1(_safe_text(tool_input.get('summary')).encode()).hexdigest()[:10]}",
         )
         message = self.mailbox.send(
@@ -395,7 +464,7 @@ class CriticToolHandlers:
             from_role=CRITIC_ROLE,
             broadcast=True,
             message_type="observation",
-            payload={"kind": "conflict", "conflict_id": conflict.item_id, "summary": conflict.title, "reason": _safe_text(tool_input.get("reason"))},
+            payload={"kind": "conflict", "conflict_id": conflict.item_id, "summary": conflict.title, "reason": _safe_text(tool_input.get("reason")), "review_basis": review_basis},
             related_task_id=self.task.task_id,
         )
         self.state.created_board_item_ids.append(conflict.item_id or "")
@@ -404,6 +473,13 @@ class CriticToolHandlers:
 
     def mark_review_passed(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         reason = _safe_text(tool_input.get("reason"))
+        verdict = _safe_text(tool_input.get("verdict")) or "pass"
+        if verdict not in {"pass", "pass_with_caveats"}:
+            verdict = "pass"
+        caveats = [str(item).strip() for item in list(tool_input.get("caveats") or []) if str(item).strip()]
+        review_basis = _review_basis(tool_input)
+        if not review_basis:
+            return _missing_review_basis("mark_review_passed")
         issue_keys = [
             str(self.task.inputs.get("issue_key") or "").strip(),
             *self.board_store.issue_keys_for_evidence(self.task.run_id, list(self.state.evidence_ids)),
@@ -422,17 +498,44 @@ class CriticToolHandlers:
             message_type="response",
             payload={
                 "kind": "pass",
-                "verdict": "pass",
+                "verdict": verdict,
                 "reason": reason,
                 "confidence": tool_input.get("confidence"),
+                "caveats": caveats,
                 "evidence_ids": list(self.state.evidence_ids),
                 "resolved_conflict_ids": [item.item_id for item in resolved_conflicts],
+                "review_basis": review_basis,
             },
             related_task_id=self.task.task_id,
         )
         self.state.created_message_ids.append(message.message_id or "")
         self.state.created_board_item_ids.extend([item.item_id or "" for item in resolved_conflicts])
         return {"ok": True, "message_id": message.message_id, "resolved_conflict_ids": [item.item_id for item in resolved_conflicts]}
+
+    def reject_direction(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        evidence_ids = [str(item).strip() for item in list(tool_input.get("evidence_ids") or self.state.evidence_ids) if str(item).strip()]
+        review_basis = _review_basis(tool_input)
+        if not review_basis:
+            return _missing_review_basis("reject_direction")
+        message = self.mailbox.send(
+            self.task.run_id,
+            from_role=CRITIC_ROLE,
+            broadcast=True,
+            message_type="observation",
+            payload={
+                "kind": "direction_rejected",
+                "direction": _safe_text(tool_input.get("direction")),
+                "source_url": _safe_text(tool_input.get("source_url")),
+                "reason": _safe_text(tool_input.get("reason")),
+                "confidence": tool_input.get("confidence"),
+                "evidence_ids": evidence_ids,
+                "blocking_repair": False,
+                "review_basis": review_basis,
+            },
+            related_task_id=self.task.task_id,
+        )
+        self.state.created_message_ids.append(message.message_id or "")
+        return {"ok": True, "message_id": message.message_id, "blocking_repair": False}
 
     def finish_review(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         status = _safe_text(tool_input.get("status")) or "complete"
@@ -480,6 +583,56 @@ class CriticToolHandlers:
                 return True
         return False
 
+    def _blocking_repair_count_for_run(self) -> int:
+        return sum(
+            1
+            for task in self.task_store.store.list_swarm_tasks(self.task.run_id)
+            if task.kind in {"research_repair", "repair_request"}
+            and bool(task.inputs.get("blocking_repair", True))
+            and task.created_by == CRITIC_ROLE
+        )
+
+    def _blocking_repair_count_for_review(self) -> int:
+        return sum(
+            1
+            for task in self.task_store.store.list_swarm_tasks(self.task.run_id)
+            if task.kind in {"research_repair", "repair_request"}
+            and bool(task.inputs.get("blocking_repair", True))
+            and str(task.inputs.get("origin_review_task_id") or "") == str(self.task.task_id or "")
+        )
+
+    def _write_repair_exhausted(
+        self,
+        *,
+        issue_key: str,
+        targeted_query: str,
+        must_fix: list[str],
+        error: str,
+        repair_attempt: int,
+        max_repair_attempts: int,
+    ) -> dict[str, Any]:
+        exhausted = self.mailbox.send(
+            self.task.run_id,
+            from_role=CRITIC_ROLE,
+            to_role="lead",
+            message_type="observation",
+            payload={
+                "kind": "repair_exhausted",
+                "issue_key": issue_key,
+                "targeted_query": targeted_query,
+                "must_fix": must_fix,
+                "repair_attempt": repair_attempt,
+                "max_repair_attempts": max_repair_attempts,
+                "blocking_repairs_used_for_run": self._blocking_repair_count_for_run(),
+                "max_blocking_repairs_per_run": DEFAULT_MAX_BLOCKING_REPAIRS_PER_RUN,
+                "blocking_repairs_used_for_review": self._blocking_repair_count_for_review(),
+                "max_blocking_repairs_per_review": DEFAULT_MAX_BLOCKING_REPAIRS_PER_REVIEW,
+            },
+            related_task_id=self.task.task_id,
+        )
+        self.state.created_message_ids.append(exhausted.message_id or "")
+        return {"ok": False, "terminal": False, "error": error, "message_id": exhausted.message_id, "issue_key": issue_key}
+
     def _next_repair_attempt(self, issue_key: str) -> int:
         attempts = [
             int(task.inputs.get("repair_attempt") or 0)
@@ -506,28 +659,65 @@ def _shorten(value: str, limit: int) -> str:
     return value[: limit - 1].rstrip() + "..."
 
 
-def _source_category(source_url: str) -> str:
-    lower = source_url.lower()
-    if "openai.com" in lower or "blog.samaltman.com" in lower:
-        return "primary_source"
-    if any(domain in lower for domain in ["reuters.com", "apnews.com", "arstechnica.com", "nytimes.com", "economictimes.com"]):
-        return "news"
-    if any(domain in lower for domain in ["community.openai.com", "lesswrong.com", "reddit.com", "zhihu.com"]):
-        return "forum_or_discussion"
-    return "secondary_source"
+def _review_basis(tool_input: dict[str, Any]) -> dict[str, Any]:
+    value = tool_input.get("review_basis")
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "quote_integrity",
+        "claim_alignment",
+        "coverage_for_review_scope",
+        "source_concentration",
+        "freshness_fit",
+        "tensions",
+        "review_disposition",
+        "disposition_reason",
+        "must_fix",
+        "caveats",
+        "rejected_direction",
+    }
+    return {key: value.get(key) for key in allowed if key in value}
 
 
-def _source_risks(source_url: str, items: list[dict[str, Any]]) -> list[str]:
+def _missing_review_basis(tool_name: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": f"{tool_name} requires review_basis from the final Critic private review state",
+        "required_next_step": "Form review_basis in private_state, then retry the same terminal tool with that review_basis.",
+        "missing_review_basis": True,
+        "terminal": False,
+    }
+
+
+def _source_role_hint(source_url: str) -> str:
+    parsed = urlparse(_safe_text(source_url))
+    tokens = " ".join(
+        part.strip().lower()
+        for part in [parsed.netloc, parsed.path, parsed.query]
+        if part.strip()
+    )
+    if any(token in tokens for token in ["forum", "community", "discussion", "thread", "question", "answer"]):
+        return "discussion_hint"
+    if any(token in tokens for token in ["docs", "documentation", "reference", "api"]):
+        return "documentation_hint"
+    if any(token in tokens for token in ["press", "release", "announcement", "newsroom", "blog"]):
+        return "publisher_page_hint"
+    if any(token in tokens for token in ["news", "article", "story", "analysis"]):
+        return "article_or_analysis_hint"
+    return "unknown"
+
+
+def _source_risks(source_url: str, items: list[dict[str, Any]], *, total_evidence: int) -> list[str]:
     risks: list[str] = []
-    lower = source_url.lower()
-    if _source_category(source_url) != "primary_source":
-        risks.append("non_primary_source")
-    if any(domain in lower for domain in ["reddit.com", "zhihu.com", "wallstreetcn.com", "reuters.com", "nytimes.com"]):
-        risks.append("may_be_blocked_or_paywalled")
-    if len(items) > 5:
+    source_role_hint = _source_role_hint(source_url)
+    if source_role_hint == "discussion_hint":
+        risks.append("discussion_or_user_generated_possible")
+    if total_evidence > 1 and len(items) / total_evidence >= 0.6:
         risks.append("source_dominates_bundle")
     if any(float(item.get("confidence") or 0.0) < 0.7 for item in items):
         risks.append("low_confidence_evidence")
+    if any(not _safe_text(item.get("freshness")) for item in items):
+        risks.append("missing_freshness")
     return risks
 
 

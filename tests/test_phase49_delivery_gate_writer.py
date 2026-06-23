@@ -233,7 +233,7 @@ def test_delivery_gate_open_creates_writer_task_and_writer_outputs_report(tmp_pa
     refreshed = store.get_swarm_run_state(run_state.run_id)
     result = WriterWorker(task_store, mailbox, artifact_store).run_once(run_state.run_id)
     report_artifacts = [
-        artifact for artifact in store.list_swarm_artifacts(run_state.run_id) if artifact.type == "report"
+        artifact for artifact in store.list_swarm_artifacts(run_state.run_id) if artifact.type == "report_partial"
     ]
 
     assert decision.status == "open"
@@ -242,7 +242,8 @@ def test_delivery_gate_open_creates_writer_task_and_writer_outputs_report(tmp_pa
     assert writer_tasks[0].kind == "delivery_request"
     assert result is not None
     assert len(report_artifacts) == 1
-    assert Path(report_artifacts[0].payload_ref).read_text(encoding="utf-8")
+    body = Path(report_artifacts[0].payload_ref).read_text(encoding="utf-8")
+    assert "fallback report generated because WriterAgent did not publish" in body
 
 
 def test_delivery_gate_stays_closed_while_critic_review_is_pending(tmp_path: Path) -> None:

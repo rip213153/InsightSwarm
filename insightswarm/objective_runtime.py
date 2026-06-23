@@ -162,16 +162,25 @@ def create_and_run_objective(
     input_files: list[str] | None = None,
     **_: Any,
 ) -> DeliveryResult:
-    fixture = _fixture_payload()
     if browser_backend:
         os.environ["INSIGHTSWARM_BROWSER_BACKEND"] = browser_backend
     if browser_cdp_url:
         os.environ["INSIGHTSWARM_BROWSER_CDP_URL"] = browser_cdp_url
-    run_id = store.create_run(name, {"query": query, "model_provider": model_provider})
+    run_id = new_id("run")
+    metadata = {
+        "name": name,
+        "query": query,
+        "model_provider": model_provider,
+        "quality_mode": quality_mode,
+        "search_provider": search_provider,
+        "browser_backend": browser_backend,
+        "browser_cdp_url": browser_cdp_url,
+        "user_input_count": 0,
+    }
     store.create_swarm_run_state(
         run_id=run_id,
         objective=query,
-        budget={"max_steps": max_steps},
+        budget={"max_steps": max_steps, "metadata": metadata},
         phase="discovery",
     )
     model_registry = (
@@ -187,17 +196,11 @@ def create_and_run_objective(
         file_paths=input_files,
         vision_model_client=vision_model_client,
     )
-    metadata = {
-        "query": query,
-        "model_provider": model_provider,
-        "quality_mode": quality_mode,
-        "search_provider": search_provider,
-        "browser_backend": browser_backend,
-        "browser_cdp_url": browser_cdp_url,
-        "user_input_count": len(user_input_summaries),
-    }
-    with store.transaction() as conn:
-        conn.execute("UPDATE runs SET metadata_json = ? WHERE run_id = ?", (json.dumps(metadata), run_id))
+    metadata["user_input_count"] = len(user_input_summaries)
+    store.update_swarm_run_state(
+        run_id,
+        budget={"max_steps": max_steps, "metadata": metadata},
+    )
     task_store = TaskStore(store)
     mailbox = Mailbox(store)
     bootstrap_lead_objective(
@@ -205,11 +208,11 @@ def create_and_run_objective(
         mailbox,
         run_id=run_id,
         question=query,
-        sub_questions=list(fixture.get("sub_questions") or []),
-        browser_goal=fixture.get("browser_goal"),
         user_inputs=user_input_summaries,
     )
     model_client = None if model_registry else build_model_client(model_provider)
+    if browser_model_client is None:
+        browser_model_client = model_client
     return run_objective(
         store,
         query,
@@ -304,9 +307,17 @@ def _agent_model(state: RuntimeState, role: str, *, capability: str = "text") ->
 def _browser_model(model_registry: ModelRegistry | None) -> Any | None:
     if model_registry is None:
         return None
+    try:
+        text_client = model_registry.for_agent("browser", capability="text")
+    except ValueError:
+        text_client = model_registry.for_agent("browser")
+    try:
+        vision_client = model_registry.for_agent("vision", capability="vision")
+    except ValueError:
+        vision_client = text_client
     return BrowserCompositeModelClient(
-        text_client=model_registry.for_agent("browser", capability="text"),
-        vision_client=model_registry.for_agent("vision", capability="vision"),
+        text_client=text_client,
+        vision_client=vision_client,
     )
 
 
@@ -416,17 +427,9 @@ def _write_runtime_trace(state: RuntimeState, event: str, payload: dict[str, Any
 def _build_delivery_result(store: Store, state: RuntimeState, stop_reason: StopReason) -> DeliveryResult:
     report = _load_report_from_store(store, state.run_id, frontier_hash=state.delivery_frontier_hash)
     critic = _latest_critic_summary(store, state.run_id) or _default_critic_summary(store, state.run_id)
-    fixture = _fixture_payload()
     result_type: DeliveryKind = "report"
     final_state = "completed"
     must_fix: list[str] = []
-
-    if fixture.get("repair_documents") and critic.get("verdict") == "pass":
-        critic = {
-            "verdict": "repair",
-            "must_fix": ["Primary-source evidence is missing or explicitly speculative."],
-            "targeted_query": "official primary source confirmation",
-        }
 
     if stop_reason == "human_required":
         result_type = "report_blocked"
@@ -544,47 +547,12 @@ def _technical_failures(store: Store, run_id: str) -> list[dict[str, Any]]:
 
 
 def _assemble_result_steps(store: Store, state: RuntimeState, critic: dict[str, Any]) -> list[dict[str, Any]]:
-    fixture = _fixture_payload()
     steps: list[dict[str, Any]] = []
-    if fixture.get("search_results"):
-        steps.append(
-            {
-                "tool_call": {"action": "search", "arguments": {"query": state.question}},
-                "result": {"status": "ok", "progressed": True, "results": list(fixture.get("search_results") or [])},
-            }
-        )
-    if fixture.get("documents"):
-        steps.append(
-            {
-                "tool_call": {"action": "extract", "arguments": {"document_index": 0}},
-                "result": {"status": "ok", "progressed": True, "artifact_count": len(store.list_swarm_artifacts(state.run_id))},
-            }
-        )
     if critic.get("verdict"):
         steps.append(
             {
                 "tool_call": {"action": "critic", "arguments": {}},
                 "result": {"status": "ok", "progressed": True, "verdict": critic.get("verdict")},
-            }
-        )
-    if fixture.get("repair_search_results"):
-        steps.append(
-            {
-                "tool_call": {"action": "search", "arguments": {"repair_round": True, "query": critic.get("targeted_query") or state.question}},
-                "result": {"status": "ok", "progressed": True, "results": list(fixture.get("repair_search_results") or [])},
-            }
-        )
-        steps.append(
-            {
-                "tool_call": {"action": "critic", "arguments": {}},
-                "result": {"status": "ok", "progressed": True, "verdict": critic.get("verdict")},
-            }
-        )
-    if fixture.get("browser_goal"):
-        steps.append(
-            {
-                "tool_call": {"action": "spawn_browser", "arguments": {"goal": fixture.get("browser_goal")}},
-                "result": {"status": "blocked", "progressed": False},
             }
         )
     steps.append(
@@ -599,15 +567,5 @@ def _assemble_result_steps(store: Store, state: RuntimeState, critic: dict[str, 
         }
     )
     return steps
-
-
-def _fixture_payload() -> dict[str, Any]:
-    fixture_name = os.getenv("INSIGHTSWARM_SCRIPTED_FIXTURE")
-    if not fixture_name:
-        return {}
-    fixture_path = Path(__file__).resolve().parent / "tools" / "fixtures" / f"{fixture_name}.json"
-    if not fixture_path.exists():
-        return {}
-    return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 

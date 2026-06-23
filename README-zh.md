@@ -25,18 +25,22 @@ python -m venv .venv
 pip install -e ".[browser]"
 ```
 
-将 `.env.example` 复制为 `.env`，或直接设置环境变量。
-将 `config.models.example.json` 复制为 `config.models.json`，然后只修改
-provider 的 `base_url`、`api_key_env` 和模型名即可切换 OpenAI-compatible 端点。
+将 `.env.example` 复制为 `.env`，或直接设置环境变量。交互式启动器可以直接读取环境变量，不要求本地存在 `config.models.json`。
 
 ```powershell
-$env:MODEL_API_KEY="..."
 $env:TAVILY_API_KEY="..."
-$env:INSIGHTSWARM_MODEL_CONFIG="config.models.json"
-$env:INSIGHTSWARM_MODEL_PROVIDER="default"
+$env:DASHSCOPE_API_KEY="..."
+$env:INSIGHTSWARM_QWEN_TEXT_MODEL="qwen3.7-plus"
 ```
 
-可选配置：
+如果你需要按 agent 分配不同模型，可以选择文件路由：
+
+```powershell
+Copy-Item config.models.example.json config.models.json
+$env:INSIGHTSWARM_MODEL_CONFIG="config.models.json"
+```
+
+可选采集工具：
 
 ```powershell
 $env:FIRECRAWL_API_KEY="..."
@@ -54,26 +58,28 @@ $env:PYTHONUTF8="1"
 $env:PYTHONIOENCODING="utf-8"
 ```
 
-运行一个实际的研究问题：
+启动交互式运行时：
 
 ```powershell
-python -m insightswarm.cli --model-provider default run ask "为什么2026年中国航空公司燃油费屡次上调" --search-provider tavily --max-runtime-seconds 1800 --max-no-progress-seconds 180 --max-drain-seconds 900
+python main.py
 ```
 
-在复杂的网页获取中使用可见的浏览器路径：
+进入后可以这样使用：
+
+```text
+InsightSwarm> /model qwen3.7-plus
+InsightSwarm> /ask 为什么2026年中国航空公司燃油费屡次上调？
+InsightSwarm> /ask --image C:\path\to\image.png 我想了解这张图片里的网站
+InsightSwarm> /exit
+```
+
+也可以一次性提问：
 
 ```powershell
-$env:INSIGHTSWARM_BROWSER_BACKEND="visible"
-$env:INSIGHTSWARM_BROWSER_PROFILE_ROOT="E:\code\InsightSwarm\.tmp\browser-profiles"
-
-python -m insightswarm.cli --model-provider default run ask "了解这个复杂网站" --browser-backend visible --search-provider tavily
+python main.py "为什么2026年中国航空公司燃油费屡次上调？"
 ```
 
-附加本地多模态输入（如图片）作为用户提供的上下文：
-
-```powershell
-python -m insightswarm.cli --model-provider default run ask "我想了解这张图片里的网站" --input-file "C:\path\to\image.png" --browser-backend visible
-```
+每次完成后会输出简洁的运行指标：耗时分钟、token 消耗、模型调用次数、证据数量和原始文档数量。
 
 输出结果将被写入本地以下路径：
 
@@ -91,14 +97,6 @@ python -m insightswarm.cli run smoke "smoke test"
 
 ```powershell
 python -m pytest -q
-```
-
-验收测试需要真实的模型凭证和脚本化的测试固件（fixtures）。
-
-在配置好凭证后，可显式运行这些测试：
-
-```powershell
-python -m pytest -q tests/acceptance
 ```
 
 ## 文档
