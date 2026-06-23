@@ -479,7 +479,7 @@ class ResearcherToolHandlers:
             "usability_reason": page_profile["reason"],
             "page_type": page_profile["page_type"],
             "information_density": page_profile["estimated_information_density"],
-            "text_preview": _safe_text(document.get("text"))[:900],
+            "text_preview": _text_preview(document.get("text")),
         }
         document_record = {
             **document,
@@ -537,7 +537,7 @@ class ResearcherToolHandlers:
             "usability_reason": page_profile["reason"],
             "page_type": page_profile["page_type"],
             "information_density": page_profile["estimated_information_density"],
-            "text_preview": _safe_text(document.get("text"))[:900],
+            "text_preview": _text_preview(document.get("text")),
             "fetcher": "firecrawl",
         }
         document_record = {
@@ -958,7 +958,7 @@ class _ResearchSubagentHandlers:
             "usability_reason": page_profile["reason"],
             "page_type": page_profile["page_type"],
             "information_density": page_profile["estimated_information_density"],
-            "text_preview": _safe_text(document.get("text"))[:700],
+            "text_preview": _text_preview(document.get("text"), size=1500),
         }
         self.state.fetched_documents.append({**document, **visible_document, "page_profile": page_profile})
         return {"ok": True, "document": visible_document}
@@ -1226,6 +1226,40 @@ def _tokens(value: str) -> set[str]:
     return ascii_tokens | cjk_terms
 
 
+_BOILERPLATE_MARKERS = (
+    "subscribe to our newsletter", "subscribe to newsletter", "sign up for our", "sign up for the newsletter",
+    "proceed", "change location", "shop in", "select your country", "choose your country",
+    "cookie", "cookies", "accept all", "accept cookies", "cookie policy", "cookie center", "cookie settings",
+    "privacy policy", "privacy notice", "terms of use", "terms of service", "conditions of sale",
+    "sitemap", "follow us", "wishlist", "find a boutique", "find a store", "store locator",
+    "customer contact", "track your order", "track order", "shipping & delivery", "shipping and delivery",
+    "copyright", "credits", "accessibility statement", "all rights reserved", "back to top",
+    "menu", "search", "close", "open menu", "skip to content",
+)
+
+
+def _looks_like_boilerplate_shell(text: str) -> bool:
+    """Detect SPA/navigation shells whose char count is inflated by chrome, not prose.
+
+    Real articles have sentence punctuation and few boilerplate phrases; nav/modal
+    chrome has the opposite signature. We only flag long text so genuine short
+    pages fall through to the existing length-based path.
+    """
+    length = len(text)
+    if length < 1500:
+        return False
+    lower = text.lower()
+    marker_hits = sum(1 for marker in _BOILERPLATE_MARKERS if marker in lower)
+    sentence_ends = sum(lower.count(p) for p in (".", "。", "！", "？", "!", "?"))
+    # Long text with almost no sentence punctuation AND several boilerplate markers
+    # => navigation/modal/footer chrome, not an article.
+    if marker_hits >= 3 and sentence_ends < max(3, length / 600):
+        return True
+    if marker_hits >= 6 and sentence_ends < max(5, length / 500):
+        return True
+    return False
+
+
 def _classify_page(document: dict[str, Any], url: str) -> dict[str, Any]:
     text = _safe_text(document.get("text"))
     html = _safe_text(document.get("html"))
@@ -1237,6 +1271,8 @@ def _classify_page(document: dict[str, Any], url: str) -> dict[str, Any]:
         return {"page_type": "social_feed", "estimated_information_density": "low", "likely_extractable": False, "reason": "platform_shell_low_signal"}
     if len(text) < 500:
         return {"page_type": "article", "estimated_information_density": "low", "likely_extractable": False, "reason": "too_little_visible_text"}
+    if _looks_like_boilerplate_shell(text):
+        return {"page_type": "spa_shell", "estimated_information_density": "low", "likely_extractable": False, "reason": "boilerplate_or_chrome_dominant"}
     if len(text) < 1500:
         return {"page_type": "article", "estimated_information_density": "medium", "likely_extractable": True, "reason": "medium_text_density"}
     return {"page_type": "article", "estimated_information_density": "high", "likely_extractable": True, "reason": "sufficient_text_density"}
@@ -1249,7 +1285,7 @@ def _acquisition_pressure(state: ResearcherToolState, task: Task) -> dict[str, A
     blocked_failures = [
         item
         for item in failures
-        if item.get("failure_kind") in {"http_403", "http_429", "verification_or_blocked", "blocked_page", "platform_shell_low_signal"}
+        if item.get("failure_kind") in {"http_403", "http_429", "verification_or_blocked", "blocked_page", "platform_shell_low_signal", "spa_shell_low_signal"}
     ]
     domains = sorted({str(item.get("domain") or "") for item in blocked_failures if item.get("domain")})
     target_url = _latest_failed_url(blocked_failures) or _latest_failed_url(failures)
@@ -1285,6 +1321,8 @@ def _failure_kind(reason: str, *, document: dict[str, Any]) -> str:
         return "verification_or_blocked"
     if "platform_shell" in lowered:
         return "platform_shell_low_signal"
+    if "spa_shell" in lowered or "boilerplate_or_chrome" in lowered:
+        return "spa_shell_low_signal"
     if "blocked" in lowered:
         return "blocked_page"
     if "too_little_visible_text" in lowered or "low" in lowered:
@@ -1442,3 +1480,20 @@ def _safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _text_preview(value: Any, *, size: int = 1800) -> str:
+    """Sample a representative slice of the document text for the model.
+
+    Long pages usually have boilerplate at the top (nav/cookie banners) and
+    bottom (footer/related links). Sampling the middle gives the model a much
+    better signal for source usability and extraction planning than head-only.
+    """
+    text = _safe_text(value)
+    if len(text) <= size:
+        return text
+    # Keep a small head for context, then sample the middle band.
+    head = 200
+    mid_start = max(head, (len(text) - size) // 2 + head // 2)
+    mid_end = min(len(text), mid_start + (size - head))
+    return text[:head] + "\n…[middle sample]…\n" + text[mid_start:mid_end]

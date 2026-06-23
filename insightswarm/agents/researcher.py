@@ -185,6 +185,7 @@ class Researcher:
             },
             state=loop_state,
             safety_cap=safety_cap,
+            max_tokens=2600,
             metadata_role="researcher_tool_loop",
             metadata={
                 "run_id": task.run_id,

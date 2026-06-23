@@ -162,6 +162,7 @@ class Critic:
             },
             state=loop_state,
             safety_cap=safety_cap,
+            max_tokens=2800,
             metadata_role="critic_tool_loop",
             metadata={
                 "run_id": task.run_id,

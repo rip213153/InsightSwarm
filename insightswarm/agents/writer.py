@@ -333,6 +333,7 @@ class WriterWorker:
                 },
                 state=loop_state,
                 safety_cap=8,
+                max_tokens=6000,
                 metadata_role="writer_tool_loop",
                 metadata={
                     "run_id": task.run_id,

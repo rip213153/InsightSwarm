@@ -20,8 +20,16 @@ class FetchUrlTool:
             return blocked
 
         started = time.perf_counter()
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; InsightSwarmResearch/1.0; +https://github.com/insightswarm)",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+            },
+        )
         try:
-            with urllib.request.urlopen(url, timeout=float(tool_input.get("timeout") or 20.0)) as response:
+            with urllib.request.urlopen(request, timeout=float(tool_input.get("timeout") or 20.0)) as response:
                 raw = response.read()
                 html = raw.decode("utf-8", errors="replace")
                 cleaned = _clean_html(html)
@@ -51,9 +59,15 @@ def _clean_html(raw_html: str) -> dict[str, str]:
     title_match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
     title = _collapse_whitespace(_strip_tags(title_match.group(1))) if title_match else ""
     body = re.sub(
-        r"<(script|style|nav|header|footer|svg)\b[^>]*>.*?</\1>",
+        r"<(script|style|nav|header|footer|svg|form|aside|noscript)\b[^>]*>.*?</\1>",
         " ",
         html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    body = re.sub(
+        r"<\w+\b[^>]*\b(class|id|aria-label)\s*=\s*[\"'][^\"']*(?:cookie|consent|newsletter|gdpr|modal|overlay|popup|subscribe)[^\"']*[\"'][^>]*>.*?</\w+>",
+        " ",
+        body,
         flags=re.IGNORECASE | re.DOTALL,
     )
     body = re.sub(r"<!--.*?-->", " ", body, flags=re.DOTALL)

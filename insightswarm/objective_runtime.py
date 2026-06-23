@@ -230,6 +230,59 @@ def create_and_run_objective(
     )
 
 
+def resume_objective(
+    store: Store,
+    run_id: str,
+    *,
+    model_provider: str,
+    model_config_path: str | Path | None = None,
+    artifact_dir: Path,
+    max_steps: int = 12,
+    max_runtime_seconds: float = 1800.0,
+    max_no_progress_seconds: float = 120.0,
+    max_drain_seconds: float = 900.0,
+    browser_backend: str | None = "visible",
+    browser_cdp_url: str | None = None,
+) -> DeliveryResult:
+    """Resume a previously started (and possibly interrupted) run.
+
+    Reuses the persisted task graph, messages, and artifacts for ``run_id``:
+    recovers expired leases, restarts the worker threads, and re-evaluates the
+    delivery gate. Does NOT re-bootstrap the objective or re-ingest user inputs.
+    If a report was already produced, returns it immediately.
+    """
+    if browser_backend:
+        os.environ["INSIGHTSWARM_BROWSER_BACKEND"] = browser_backend
+    if browser_cdp_url:
+        os.environ["INSIGHTSWARM_BROWSER_CDP_URL"] = browser_cdp_url
+    run_state = store.get_swarm_run_state(run_id)
+    question = run_state.objective
+    model_registry = (
+        ModelRegistry.from_file(model_config_path, store=store)
+        if model_config_path
+        else None
+    )
+    model_client = None if model_registry else build_model_client(model_provider)
+    browser_model_client = _browser_model(model_registry)
+    if browser_model_client is None:
+        browser_model_client = model_client
+    return run_objective(
+        store,
+        question,
+        ObjectiveBudget(
+            max_steps=max_steps,
+            max_runtime_seconds=max_runtime_seconds,
+            max_no_progress_seconds=max_no_progress_seconds,
+            max_drain_seconds=max_drain_seconds,
+        ),
+        artifact_dir.parent,
+        model_client=model_client,
+        run_id=run_id,
+        browser_model_client=browser_model_client,
+        model_registry=model_registry,
+    )
+
+
 def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threading.Event) -> list[threading.Thread]:
     assert state.task_store is not None and state.mailbox is not None and state.artifact_store is not None and state.board_store is not None
     artifact_store = ArtifactStore(store)

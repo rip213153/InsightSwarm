@@ -123,35 +123,56 @@ class OpenAICompatibleClient:
         if temperature is not None:
             payload["temperature"] = temperature
         started = time.perf_counter()
-        request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            return self._error_result(
-                f"OpenAI-compatible API HTTP {exc.code}: {detail[:500]}",
-                started,
-                {"http_status": exc.code},
+        request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        max_retries = 3
+        raw: dict[str, Any] = {}
+        for attempt in range(max_retries + 1):
+            request = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=request_body,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
             )
-        except urllib.error.URLError as exc:
-            return self._error_result(f"OpenAI-compatible API request failed: {exc.reason}", started)
-        except (TimeoutError, socket.timeout) as exc:
-            return self._error_result(f"OpenAI-compatible API request timed out: {exc}", started)
-        except http.client.IncompleteRead as exc:
-            return self._error_result(f"OpenAI-compatible API response incomplete: {exc}", started)
-        except (ConnectionResetError, OSError) as exc:
-            return self._error_result(f"OpenAI-compatible API connection failed: {exc}", started)
-        except json.JSONDecodeError as exc:
-            return self._error_result(f"OpenAI-compatible API returned invalid JSON: {exc}", started)
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    raw = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                status_code = exc.code
+                if attempt < max_retries and self._should_retry_status(status_code):
+                    time.sleep(self._retry_delay(exc, attempt))
+                    continue
+                return self._error_result(
+                    f"OpenAI-compatible API HTTP {status_code}: {detail[:500]}",
+                    started,
+                    {"http_status": status_code},
+                )
+            except urllib.error.URLError as exc:
+                if attempt < 1:
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
+                return self._error_result(f"OpenAI-compatible API request failed: {exc.reason}", started)
+            except (TimeoutError, socket.timeout) as exc:
+                if attempt < 1:
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
+                return self._error_result(f"OpenAI-compatible API request timed out: {exc}", started)
+            except http.client.IncompleteRead as exc:
+                if attempt < 1:
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
+                return self._error_result(f"OpenAI-compatible API response incomplete: {exc}", started)
+            except (ConnectionResetError, OSError) as exc:
+                if attempt < 1:
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
+                return self._error_result(f"OpenAI-compatible API connection failed: {exc}", started)
+            except json.JSONDecodeError as exc:
+                return self._error_result(f"OpenAI-compatible API returned invalid JSON: {exc}", started)
         latency_ms = int((time.perf_counter() - started) * 1000)
         choice = (raw.get("choices") or [{}])[0]
         message = choice.get("message") or {}
@@ -168,6 +189,19 @@ class OpenAICompatibleClient:
             raw_response=raw,
             status="ok",
         )
+
+    def _should_retry_status(self, status_code: int) -> bool:
+        return status_code == 429 or 500 <= status_code < 600
+
+    def _retry_delay(self, exc: urllib.error.HTTPError | None, attempt: int) -> float:
+        if exc is not None:
+            retry_after = exc.headers.get("Retry-After") or exc.headers.get("retry-after")
+            if retry_after:
+                try:
+                    return min(float(retry_after), 20.0)
+                except ValueError:
+                    pass
+        return min(2.0 ** attempt, 8.0)
 
     def _error_result(
         self,

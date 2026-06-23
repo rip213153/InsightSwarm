@@ -40,6 +40,7 @@ def run_agent_loop(
     initial_user_payload: dict[str, Any],
     state: AgentLoopState | None = None,
     safety_cap: int = 50,
+    max_tokens: int = 2200,
     metadata_role: str = "agent_tool_loop",
     metadata: dict[str, Any] | None = None,
     on_tool_result: Callable[[int, dict[str, Any], dict[str, Any], AgentLoopState], None] | None = None,
@@ -57,6 +58,7 @@ def run_agent_loop(
             state=loop_state,
             metadata_role=metadata_role,
             metadata=metadata,
+            max_tokens=max_tokens,
         )
         tool_call = _parse_tool_call(turn, tool_specs)
         loop_state.private_state = _next_private_state(turn)
@@ -147,6 +149,7 @@ def _call_model(
     state: AgentLoopState,
     metadata_role: str,
     metadata: dict[str, Any] | None,
+    max_tokens: int = 2200,
 ) -> dict[str, Any]:
     if model_client is None:
         return {
@@ -176,14 +179,28 @@ def _call_model(
         ],
         response_format={"type": "json_object"},
         temperature=0.2,
-        max_tokens=2200,
+        max_tokens=max_tokens,
         metadata=call_metadata,
     )
     if str(getattr(result, "status", "ok")) != "ok":
+        error_text = str(getattr(result, "error", "") or "model call failed")
+        raw_response = getattr(result, "raw_response", None)
+        http_status = raw_response.get("http_status") if isinstance(raw_response, dict) else None
+        lowered_error = error_text.lower()
+        if (
+            http_status == 429
+            or "429" in error_text
+            or "rate limit" in lowered_error
+            or "quota" in lowered_error
+            or "insufficient" in lowered_error and "balance" in lowered_error
+        ):
+            stop_reason = "model_rate_limited"
+        else:
+            stop_reason = "model_error"
         return {
-            "assistant_text": str(getattr(result, "error", "") or "model call failed")[:1000],
+            "assistant_text": error_text[:1000],
             "tool_call": None,
-            "stop_reason": "model_error",
+            "stop_reason": stop_reason,
         }
     data = getattr(result, "json_data", None)
     if isinstance(data, dict):

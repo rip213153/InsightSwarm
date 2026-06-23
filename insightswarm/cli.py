@@ -13,7 +13,7 @@ from insightswarm.db.migrations import init_db
 from insightswarm.db.store import Store
 from insightswarm.eval.telemetry import collect_run_telemetry
 from insightswarm.models.router import build_model_client
-from insightswarm.objective_runtime import ObjectiveBudget, create_and_run_objective, run_objective
+from insightswarm.objective_runtime import ObjectiveBudget, create_and_run_objective, resume_objective, run_objective
 from insightswarm.util import new_id
 
 
@@ -47,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_smoke = run_sub.add_parser("smoke")
     run_smoke.add_argument("question", nargs="?", default="smoke test")
     run_smoke.add_argument("--json", action="store_true")
+
+    run_resume = run_sub.add_parser("resume", help="Resume an interrupted run by run_id, reusing its persisted task graph and artifacts.")
+    run_resume.add_argument("run_id")
+    run_resume.add_argument("--max-steps", type=int, default=12)
+    run_resume.add_argument("--max-runtime-seconds", type=float, default=1800.0)
+    run_resume.add_argument("--max-no-progress-seconds", type=float, default=120.0)
+    run_resume.add_argument("--max-drain-seconds", type=float, default=900.0)
+    run_resume.add_argument("--browser-backend", default="visible")
+    run_resume.add_argument("--browser-cdp-url", default=None)
+    run_resume.add_argument("--json", action="store_true")
 
     eval_parser = sub.add_parser("eval")
     eval_sub = eval_parser.add_subparsers(dest="action", required=True)
@@ -163,6 +173,40 @@ def main(argv: list[str] | None = None) -> int:
                     max_drain_seconds=args.max_drain_seconds,
                 )
                 payload = result.to_dict()
+        payload["run_metrics"] = _run_metrics_payload(store, payload["run_id"], elapsed_seconds=time.perf_counter() - started_at)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            print(payload["report"]["body"] if payload.get("report") else payload["result_type"])
+            _print_run_metrics(payload["run_metrics"])
+        return 0 if payload["result_type"] != "report_blocked" else 2
+
+    if args.resource == "run" and args.action == "resume":
+        run_id = args.run_id
+        started_at = time.perf_counter()
+        try:
+            result = resume_objective(
+                store,
+                run_id,
+                model_provider=settings.model_provider,
+                model_config_path=settings.model_config_path,
+                artifact_dir=settings.artifact_dir,
+                max_steps=args.max_steps,
+                max_runtime_seconds=args.max_runtime_seconds,
+                max_no_progress_seconds=args.max_no_progress_seconds,
+                max_drain_seconds=args.max_drain_seconds,
+                browser_backend=args.browser_backend,
+                browser_cdp_url=args.browser_cdp_url,
+            )
+        except KeyError as exc:
+            raise SystemExit(f"cannot resume: {exc}") from exc
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                f"{exc}\n"
+                "Tip: config.models.json is local-only and ignored by git. "
+                "Copy config.models.example.json if you want file-based routing."
+            ) from exc
+        payload = result.to_dict()
         payload["run_metrics"] = _run_metrics_payload(store, payload["run_id"], elapsed_seconds=time.perf_counter() - started_at)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

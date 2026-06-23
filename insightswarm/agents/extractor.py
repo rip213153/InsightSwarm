@@ -156,6 +156,7 @@ class Extractor:
             },
             state=loop_state,
             safety_cap=safety_cap,
+            max_tokens=3200,
             metadata_role="extractor_tool_loop",
             metadata={
                 "run_id": task.run_id,
