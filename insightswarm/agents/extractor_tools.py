@@ -258,8 +258,28 @@ class ExtractorToolHandlers:
 
         citation_artifact_ids: list[str] = []
         evidence_ids: list[str] = []
+        deduped_count = 0
+        corroboration_notes: list[dict[str, Any]] = []
         issue_key = _issue_key_for_task(self.task, document)
         for candidate in accepted:
+            # Cross-source near-duplicate check: if an existing evidence from a
+            # different source already carries this quote (syndicated copy /
+            # press reprint), skip creating a duplicate. Record corroboration
+            # on the surviving evidence's citation payload so the Writer can
+            # surface "confirmed by N sources" — this strengthens, not weakens,
+            # the report.
+            dup_evidence_id, dup_source_url = _find_near_duplicate_evidence(
+                self.artifact_store, self.task.run_id, candidate["quote"], source_url
+            )
+            if dup_evidence_id:
+                deduped_count += 1
+                corroboration_notes.append({
+                    "quote": candidate["quote"][:120],
+                    "deduped_against_evidence_id": dup_evidence_id,
+                    "deduped_against_source_url": dup_source_url,
+                    "new_source_url": source_url,
+                })
+                continue
             citation_artifact = self.artifact_store.write_citation(
                 self.task.run_id,
                 source_task_id=self.task.task_id,
@@ -307,6 +327,8 @@ class ExtractorToolHandlers:
                 "batch_id": self.task.inputs.get("batch_id"),
                 "citation_count": len(citation_artifact_ids),
                 "evidence_ids": evidence_ids,
+                "deduped_count": deduped_count,
+                "corroboration_notes": corroboration_notes,
             },
             related_task_id=self.task.task_id,
         )
@@ -350,6 +372,8 @@ class ExtractorToolHandlers:
             "batch_id": batch_id,
             "review_task_id": review_task_id,
             "review_deferred_until_batch_ready": bool(batch_id),
+            "deduped_count": deduped_count,
+            "corroboration_notes": corroboration_notes,
         }
 
     def request_better_source(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -598,6 +622,71 @@ def _tokens(value: str) -> set[str]:
 
 def _normalize_for_backcheck(value: str) -> str:
     return re.sub(r"\s+", " ", _safe_text(value)).lower()
+
+
+def _quote_ngrams(text: str, n: int = 4) -> set[str]:
+    """Word n-grams over a normalized quote; cheap cross-source near-duplicate signal.
+
+    Punctuation is stripped before tokenization so that "earnings." and "earnings"
+    produce identical n-grams. This prevents syndicated copies that differ only in
+    punctuation from escaping the near-duplicate filter.
+    """
+    normalized = re.sub(r"\s+", " ", _safe_text(text)).lower().strip()
+    # Strip punctuation so "Q3." and "Q3" tokenize identically.
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    tokens = [t for t in normalized.split() if t]
+    if len(tokens) < n:
+        return {" ".join(tokens)} if tokens else set()
+    return {" ".join(tokens[i : i + n]) for i in range(len(tokens) - n + 1)}
+
+
+def _quote_jaccard(a: str, b: str) -> float:
+    sa, sb = _quote_ngrams(a), _quote_ngrams(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+# High threshold: only catches near-verbatim duplicates (syndicated copies,
+# press reprints, mirror pages). Semantically-similar-but-distinct quotes are
+# corroboration, not duplication, and must NOT be merged.
+_QUOTE_DUPLICATE_THRESHOLD = 0.85
+
+
+def _find_near_duplicate_evidence(
+    artifact_store: ArtifactStore,
+    run_id: str,
+    quote: str,
+    current_source_url: str,
+) -> tuple[str | None, str | None]:
+    """Return (evidence_id, source_url) of an existing near-duplicate, or (None, None).
+
+    Only matches evidence from a DIFFERENT source URL — same-source duplicates
+    are handled by the per-task quote backcheck. Cross-source near-duplicates
+    indicate syndication/mirroring and should be deduped, with the surviving
+    evidence recording corroboration.
+    """
+    normalized_quote = _normalize_for_backcheck(quote)
+    if not normalized_quote:
+        return None, None
+    try:
+        existing = artifact_store.store.list_swarm_evidence(run_id)
+    except Exception:
+        return None, None
+    for ev in existing:
+        ev_url = _safe_text(getattr(ev, "source_url", ""))
+        if ev_url and ev_url == current_source_url:
+            continue
+        ev_quote = _safe_text(getattr(ev, "quote", ""))
+        if not ev_quote:
+            continue
+        # Fast path: exact normalized match.
+        if _normalize_for_backcheck(ev_quote) == normalized_quote:
+            return getattr(ev, "evidence_id", None), ev_url
+        # Slow path: high-threshold n-gram jaccard.
+        if _quote_jaccard(ev_quote, quote) >= _QUOTE_DUPLICATE_THRESHOLD:
+            return getattr(ev, "evidence_id", None), ev_url
+    return None, None
 
 
 def _looks_boilerplate(value: str) -> bool:

@@ -1,29 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
 from typing import Any
 
 from insightswarm.agents.agent_loop import AgentLoopState, run_agent_loop
 from insightswarm.agents.agent_failure_reporting import record_agent_technical_failure
+from insightswarm.agents.execution_cell import run_in_cell, run_supervised_once
 from insightswarm.agents.researcher_tools import RESEARCHER_ROLE, RESEARCHER_TOOLS, ResearcherToolHandlers, ResearcherToolState
 from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.agents.trace import build_tool_trace_callback
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
-
-
-@dataclass(frozen=True)
-class Finding:
-    question: str
-    answer: str
-    started_at: str
-    finished_at: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -34,18 +23,6 @@ class ResearcherResult:
     created_artifact_ids: list[str] = field(default_factory=list)
     terminal_status: str | None = None
     terminal_reason: str | None = None
-
-
-def run_researcher(question: str, budget: dict | None = None) -> Finding:
-    del budget
-    started_at = _now()
-    finished_at = _now()
-    return Finding(
-        question=question,
-        answer=f"Researcher requires shared-store task execution: {question}",
-        started_at=started_at,
-        finished_at=finished_at,
-    )
 
 
 class Researcher:
@@ -61,11 +38,20 @@ class Researcher:
         *,
         model_client: object | None = None,
         trace_path: Path | None = None,
+        run_root: Path | None = None,
     ) -> ResearcherResult | None:
         task = self.task_store.claim_next(run_id, owner_role=RESEARCHER_ROLE)
         if task is None:
             return None
-        return self.run_task(task, model_client=model_client, trace_path=trace_path)
+        return run_in_cell(
+            task_store=self.task_store,
+            mailbox=self.mailbox,
+            task=task,
+            role=RESEARCHER_ROLE,
+            run_root=run_root,
+            body=lambda claimed: self.run_task(claimed, model_client=model_client, trace_path=trace_path),
+            make_failure_result=lambda failed: ResearcherResult(claimed_task_id=failed.task_id or ""),
+        )
 
     def run_forever(
         self,
@@ -76,10 +62,17 @@ class Researcher:
         model_client: object | None = None,
         max_iterations: int | None = None,
         trace_path: Path | None = None,
+        run_root: Path | None = None,
     ) -> list[ResearcherResult]:
         results: list[ResearcherResult] = []
         while not stop_event.is_set():
-            result = self.run_once(run_id, model_client=model_client, trace_path=trace_path)
+            result = run_supervised_once(
+                stop_event=stop_event,
+                poll_interval=poll_interval,
+                call_once=lambda: self.run_once(
+                    run_id, model_client=model_client, trace_path=trace_path, run_root=run_root
+                ),
+            )
             if result is None:
                 stop_event.wait(poll_interval)
                 continue
@@ -198,7 +191,3 @@ class Researcher:
 
 def _researcher_prompt() -> str:
     return (Path(__file__).resolve().parent.parent / "prompts" / "researcher.md").read_text(encoding="utf-8")
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()

@@ -95,7 +95,6 @@ def _handle_command(line: str, config: RuntimeConfig, repo_root: Path) -> int:
             print(f"model={config.model or '(unset)'}")
             return 0
         config.model = _unquote(rest)
-        _apply_model_env(config)
         print(f"model set to {config.model}")
         return 0
     if command == "/provider":
@@ -103,7 +102,6 @@ def _handle_command(line: str, config: RuntimeConfig, repo_root: Path) -> int:
             print(f"provider={config.provider}")
             return 0
         config.provider = _unquote(rest)
-        _apply_model_env(config)
         print(f"provider set to {config.provider}")
         return 0
     if command == "/image":
@@ -175,7 +173,7 @@ def _run_ask(
             "or provide a model config path."
         )
         return 2
-    _configure_process(repo_root, config, model_override=active_model)
+    _configure_process(repo_root, config)
     cli_args = [
         "--model-provider",
         config.provider,
@@ -199,6 +197,8 @@ def _run_ask(
         cli_args[0:0] = ["--model-config-path", config.model_config_path]
     if config.browser_cdp_url:
         cli_args.extend(["--browser-cdp-url", config.browser_cdp_url])
+    if active_model:
+        cli_args.extend(["--model", active_model])
     for path in [*config.input_files, *extra_input_files]:
         cli_args.extend(["--input-file", path])
     if json_output:
@@ -213,28 +213,10 @@ def _run_ask(
         return 1
 
 
-def _configure_process(repo_root: Path, config: RuntimeConfig, *, model_override: str | None = None) -> None:
+def _configure_process(repo_root: Path, config: RuntimeConfig) -> None:
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     os.environ.setdefault("INSIGHTSWARM_BROWSER_PROFILE_ROOT", str(repo_root / ".tmp" / "browser-profiles"))
-    os.environ["INSIGHTSWARM_MODEL_PROVIDER"] = config.provider
-    if config.model_config_path:
-        os.environ["INSIGHTSWARM_MODEL_CONFIG"] = config.model_config_path
-    if model_override:
-        _set_model_env(config.provider, model_override)
-
-
-def _apply_model_env(config: RuntimeConfig) -> None:
-    os.environ["INSIGHTSWARM_MODEL_PROVIDER"] = config.provider
-    if config.model:
-        _set_model_env(config.provider, config.model)
-
-
-def _set_model_env(provider: str, model: str) -> None:
-    provider_key = str(provider or "").upper().replace("-", "_")
-    os.environ["INSIGHTSWARM_TEXT_MODEL"] = model
-    os.environ[f"INSIGHTSWARM_{provider_key}_TEXT_MODEL"] = model
-    os.environ[f"INSIGHTSWARM_BROWSER_{provider_key}_TEXT_MODEL"] = model
 
 
 def _has_model_for_provider(provider: str, model: str | None, model_config_path: str | None) -> bool:

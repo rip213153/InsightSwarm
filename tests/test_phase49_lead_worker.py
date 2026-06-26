@@ -99,7 +99,7 @@ def test_lead_worker_turns_repair_request_into_followup_work_order(tmp_path: Pat
     assert repair_messages[0].payload["kind"] == "research_repair"
 
 
-def test_lead_worker_runs_until_idle_across_multiple_lead_tasks(tmp_path: Path) -> None:
+def test_lead_worker_run_forever_across_multiple_lead_tasks(tmp_path: Path) -> None:
     store = _build_store(tmp_path)
     task_store = TaskStore(store)
     mailbox = Mailbox(store)
@@ -126,7 +126,12 @@ def test_lead_worker_runs_until_idle_across_multiple_lead_tasks(tmp_path: Path) 
         created_by="critic",
     )
 
-    loop_result = LeadWorker(task_store, mailbox).run_until_idle(run_state.run_id)
+    loop_result = LeadWorker(task_store, mailbox).run_forever(
+        run_state.run_id,
+        threading.Event(),
+        poll_interval=0.01,
+        max_iterations=2,
+    )
 
     lead_tasks = [task for task in store.list_swarm_tasks(run_state.run_id) if task.owner_role == "lead"]
     downstream = [task for task in store.list_swarm_tasks(run_state.run_id) if task.owner_role != "lead"]

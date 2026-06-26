@@ -18,7 +18,8 @@ DEFAULT_MAX_BLOCKING_REPAIRS_PER_REVIEW = 1
 
 REVIEW_BASIS_SCHEMA = {
     "type": "object",
-    "description": "The structured review conclusion formed in Critic private OODA state before taking the terminal action.",
+    "description": "The structured review conclusion formed in Critic private OODA state before taking the terminal action. Must be a non-empty object. Recommended fields: verdict (pass/pass_with_caveats/repair/reject/conflict), reason (string), review_type (extraction_failure/evidence_review), and any of: quote_integrity, claim_alignment, coverage_for_review_scope, source_concentration, freshness_fit, tensions, must_fix, caveats, rejected_direction.",
+    "minProperties": 1,
 }
 
 
@@ -409,6 +410,7 @@ class CriticToolHandlers:
             status="pending",
             owner_role=RESEARCHER_ROLE,
             inputs={
+                "question": _safe_text(self.task.inputs.get("question")),
                 "targeted_query": targeted_query,
                 "must_fix": must_fix,
                 "preferred_source_type": _safe_text(tool_input.get("preferred_source_type")),
@@ -660,23 +662,21 @@ def _shorten(value: str, limit: int) -> str:
 
 
 def _review_basis(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Extract review_basis from the terminal tool input.
+
+    The review_basis is a non-empty object formed in the Critic's private OODA
+    state. We accept any non-empty dict — the schema is intentionally open so
+    the model can express verdict/reason/review_type plus any structured
+    findings (quote_integrity, claim_alignment, etc.). A previous whitelist
+    filter caused a deadlock (run-run_ac4eb4e41942, 2026-06-23): the model
+    filled verdict/reason/confidence which were not in the whitelist, so
+    _review_basis returned {} and every terminal tool retried forever with
+    missing_review_basis=True.
+    """
     value = tool_input.get("review_basis")
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not value:
         return {}
-    allowed = {
-        "quote_integrity",
-        "claim_alignment",
-        "coverage_for_review_scope",
-        "source_concentration",
-        "freshness_fit",
-        "tensions",
-        "review_disposition",
-        "disposition_reason",
-        "must_fix",
-        "caveats",
-        "rejected_direction",
-    }
-    return {key: value.get(key) for key in allowed if key in value}
+    return value
 
 
 def _missing_review_basis(tool_name: str) -> dict[str, Any]:
@@ -686,6 +686,7 @@ def _missing_review_basis(tool_name: str) -> dict[str, Any]:
         "required_next_step": "Form review_basis in private_state, then retry the same terminal tool with that review_basis.",
         "missing_review_basis": True,
         "terminal": False,
+        "failure_kind": "missing_review_basis",
     }
 
 

@@ -47,6 +47,7 @@ PAYLOAD_KINDS: dict[str, set[str]] = {
         "technical_failure",
         "authorization_decision",
         "direction_rejected",
+        "quick_answer_ready",
     },
     "suggestion": {
         "try_browser",

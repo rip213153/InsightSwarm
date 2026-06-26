@@ -42,10 +42,10 @@
     },
     "vision_model": {
       "type": "openai_compatible",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
       "api_key_env": "DASHSCOPE_API_KEY",
       "models": {
-        "vision": "qwen3.5-omni-plus-2026-03-15"
+        "vision": "glm-5v-turbo"
       }
     }
   },

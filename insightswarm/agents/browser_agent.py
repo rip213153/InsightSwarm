@@ -14,6 +14,7 @@ from insightswarm.agents.browser_agent_tools import (
     BrowserAgentToolState,
     HumanAuthorizationRequired,
 )
+from insightswarm.agents.execution_cell import run_in_cell, run_supervised_once
 from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.agents.trace import build_tool_trace_callback
 from insightswarm.browser_code_session import BrowserCodeSession
@@ -44,11 +45,20 @@ class BrowserWorker:
         *,
         model_client: object | None = None,
         trace_path: Path | None = None,
+        run_root: Path | None = None,
     ) -> BrowserWorkResult | None:
         task = self.task_store.claim_next(run_id, owner_role=BROWSER_ROLE)
         if task is None:
             return None
-        return self.run_task(task, model_client=model_client, trace_path=trace_path)
+        return run_in_cell(
+            task_store=self.task_store,
+            mailbox=self.mailbox,
+            task=task,
+            role=BROWSER_ROLE,
+            run_root=run_root,
+            body=lambda claimed: self.run_task(claimed, model_client=model_client, trace_path=trace_path),
+            make_failure_result=lambda failed: BrowserWorkResult(claimed_task_id=failed.task_id or ""),
+        )
 
     def run_forever(
         self,
@@ -59,11 +69,18 @@ class BrowserWorker:
         max_iterations: int | None = None,
         model_client: object | None = None,
         trace_path: Path | None = None,
+        run_root: Path | None = None,
     ) -> list[BrowserWorkResult]:
         results: list[BrowserWorkResult] = []
 
         while not stop_event.is_set():
-            result = self.run_once(run_id, model_client=model_client, trace_path=trace_path)
+            result = run_supervised_once(
+                stop_event=stop_event,
+                poll_interval=poll_interval,
+                call_once=lambda: self.run_once(
+                    run_id, model_client=model_client, trace_path=trace_path, run_root=run_root
+                ),
+            )
             if result is None:
                 stop_event.wait(poll_interval)
                 continue

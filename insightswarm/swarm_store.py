@@ -113,9 +113,19 @@ class TaskStore:
             )
             return int(cursor.rowcount or 0)
 
-    def heartbeat(self, task_id: str, *, lease_seconds: int = 900) -> Task:
+    def renew_lease_if_leased(self, task_id: str, *, lease_seconds: int = 900) -> bool:
+        # Conditional lease renewal: extends lease_until ONLY when the task is
+        # still leased. This never resurrects a task the body already
+        # completed/blocked/needs_repaired — the WHERE status='leased' guard
+        # prevents a late LeaseGuard heartbeat from undoing the release. Used
+        # by LeaseGuard's heartbeat loop.
         lease_until = _utc_now_plus(lease_seconds)
-        return self.update_status(task_id, status="leased", lease_until=lease_until)
+        with self.store.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE swarm_tasks SET lease_until = ?, updated_at = ? WHERE task_id = ? AND status = 'leased'",
+                (lease_until, _utc_now(), task_id),
+            )
+            return int(cursor.rowcount or 0) > 0
 
     def complete(self, task_id: str) -> Task:
         return self.update_status(task_id, status="done", lease_until=None)

@@ -33,6 +33,15 @@ StopReason = Literal[
 
 DeliveryKind = Literal["report", "report_partial", "report_blocked"]
 
+# Worker poll interval. Workers claim tasks by polling TaskStore; 0.5s keeps
+# task pickup latency well below a model call (~30s+) while cutting the per-run
+# SQLite query load by ~10x vs the previous 0.05s spin.
+_WORKER_POLL_INTERVAL = 0.5
+# Runtime governance loop interval. The runtime re-checks budgets, delivery
+# gate, and progress counts on this cadence; 1.0s is ample for runs measured in
+# minutes and avoids hammering list_swarm_* queries at 20Hz.
+_RUNTIME_POLL_INTERVAL = 1.0
+
 
 @dataclass(frozen=True)
 class ObjectiveBudget:
@@ -160,6 +169,7 @@ def create_and_run_objective(
     browser_backend: str | None = "visible",
     browser_cdp_url: str | None = None,
     input_files: list[str] | None = None,
+    model: str | None = None,
     **_: Any,
 ) -> DeliveryResult:
     if browser_backend:
@@ -210,7 +220,7 @@ def create_and_run_objective(
         question=query,
         user_inputs=user_input_summaries,
     )
-    model_client = None if model_registry else build_model_client(model_provider)
+    model_client = None if model_registry else build_model_client(model_provider, model=model)
     if browser_model_client is None:
         browser_model_client = model_client
     return run_objective(
@@ -243,6 +253,7 @@ def resume_objective(
     max_drain_seconds: float = 900.0,
     browser_backend: str | None = "visible",
     browser_cdp_url: str | None = None,
+    model: str | None = None,
 ) -> DeliveryResult:
     """Resume a previously started (and possibly interrupted) run.
 
@@ -262,7 +273,7 @@ def resume_objective(
         if model_config_path
         else None
     )
-    model_client = None if model_registry else build_model_client(model_provider)
+    model_client = None if model_registry else build_model_client(model_provider, model=model)
     browser_model_client = _browser_model(model_registry)
     if browser_model_client is None:
         browser_model_client = model_client
@@ -289,10 +300,16 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
     board_store = BoardStore(store)
     threads = [
         threading.Thread(
-            target=lambda: LeadWorker(state.task_store, state.mailbox, board_store).run_forever(
+            target=lambda: LeadWorker(
+                state.task_store,
+                state.mailbox,
+                board_store,
+                model_client=_agent_model(state, "lead"),
+            ).run_forever(
                 state.run_id,
                 stop_event,
-                poll_interval=0.05,
+                poll_interval=_WORKER_POLL_INTERVAL,
+                run_root=state.run_root,
             ),
             daemon=True,
         ),
@@ -300,9 +317,10 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
             target=lambda: BrowserWorker(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
                 state.run_id,
                 stop_event,
-                poll_interval=0.05,
+                poll_interval=_WORKER_POLL_INTERVAL,
                 model_client=state.browser_model_client or _browser_model(state.model_registry),
                 trace_path=state.step_trace_path,
+                run_root=state.run_root,
             ),
             daemon=True,
         ),
@@ -310,9 +328,10 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
             target=lambda: Extractor(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
                 state.run_id,
                 stop_event,
-                poll_interval=0.05,
+                poll_interval=_WORKER_POLL_INTERVAL,
                 model_client=_agent_model(state, "extractor"),
                 trace_path=state.step_trace_path,
+                run_root=state.run_root,
             ),
             daemon=True,
         ),
@@ -320,9 +339,10 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
             target=lambda: Researcher(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
                 state.run_id,
                 stop_event,
-                poll_interval=0.05,
+                poll_interval=_WORKER_POLL_INTERVAL,
                 model_client=_agent_model(state, "researcher"),
                 trace_path=state.step_trace_path,
+                run_root=state.run_root,
             ),
             daemon=True,
         ),
@@ -330,9 +350,10 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
             target=lambda: Critic(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
                 state.run_id,
                 stop_event,
-                poll_interval=0.05,
+                poll_interval=_WORKER_POLL_INTERVAL,
                 model_client=_agent_model(state, "critic"),
                 trace_path=state.step_trace_path,
+                run_root=state.run_root,
             ),
             daemon=True,
         ),
@@ -340,8 +361,9 @@ def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threadi
             target=lambda: WriterWorker(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
                 state.run_id,
                 stop_event,
-                poll_interval=0.05,
+                poll_interval=_WORKER_POLL_INTERVAL,
                 model_client=_agent_model(state, "writer"),
+                run_root=state.run_root,
             ),
             daemon=True,
         ),
@@ -422,7 +444,7 @@ def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Ev
                         {"active_task_count": len(_active_tasks(store, state.run_id))},
                     )
                 if time.monotonic() - drain_started_at < state.budget.max_drain_seconds:
-                    time.sleep(0.05)
+                    time.sleep(_WORKER_POLL_INTERVAL)
                     continue
             state.stop_reason = "budget_exhausted"
             _write_runtime_trace(state, "stop", {"stop_reason": state.stop_reason, "delivery_gate_reasons": state.delivery_gate_reasons})
@@ -484,6 +506,22 @@ def _build_delivery_result(store: Store, state: RuntimeState, stop_reason: StopR
     final_state = "completed"
     must_fix: list[str] = []
 
+    # Quick-answer path: Researcher delivered a direct answer via finish_with_answer.
+    # This bypasses Critic/Extractor/Writer, so the default critic summary would
+    # wrongly report "repair" (no citation-backed evidence). Detect the
+    # quick_answer_ready broadcast and mark the delivery as clean — but honestly:
+    # the verdict is `quick_answer_unreviewed`, NOT `pass`, because no Critic
+    # review happened. Eval/users must not mistake this for a reviewed pass.
+    quick_answer = _latest_quick_answer(store, state.run_id)
+    if quick_answer is not None:
+        critic = {
+            "verdict": "quick_answer_unreviewed",
+            "review_type": "quick_answer",
+            "confidence": quick_answer.get("confidence"),
+            "source_count": quick_answer.get("source_count"),
+            "reason": quick_answer.get("reason"),
+        }
+
     if stop_reason == "human_required":
         result_type = "report_blocked"
         final_state = "blocked"
@@ -537,9 +575,14 @@ def _load_report_from_store(store: Store, run_id: str, *, frontier_hash: str = "
             and str(message.payload.get("kind") or "") == "progress_update"
             and str(message.payload.get("frontier_hash") or "") == frontier_hash
         }
-        artifacts = [artifact for artifact in artifacts if artifact.artifact_id in report_message_by_artifact]
-        if not artifacts:
-            return None
+        # Quick-answer path: a report artifact written directly by Researcher via
+        # finish_with_answer has no writer message. If frontier filtering would
+        # drop all artifacts, fall back to the unfiltered set so the quick-answer
+        # report is still detected and the run can terminate.
+        if report_message_by_artifact:
+            artifacts = [artifact for artifact in artifacts if artifact.artifact_id in report_message_by_artifact]
+            if not artifacts:
+                return None
     artifact = artifacts[-1]
     path = Path(artifact.payload_ref)
     if not path.exists():
@@ -566,6 +609,14 @@ def _default_critic_summary(store: Store, run_id: str) -> dict[str, Any]:
         "must_fix": ["citation-backed evidence is missing"],
         "targeted_query": store.get_swarm_run_state(run_id).objective,
     }
+
+
+def _latest_quick_answer(store: Store, run_id: str) -> dict[str, Any] | None:
+    """Return the latest quick_answer_ready payload, or None if no quick-answer path was taken."""
+    for message in reversed(store.list_swarm_messages(run_id)):
+        if message.from_role == "researcher" and str(message.payload.get("kind") or "") == "quick_answer_ready":
+            return dict(message.payload)
+    return None
 
 
 def _technical_failures(store: Store, run_id: str) -> list[dict[str, Any]]:

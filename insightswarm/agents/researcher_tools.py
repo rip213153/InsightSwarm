@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -43,14 +44,19 @@ RESEARCH_SUBAGENT_TOOLS = [
     },
     {
         "name": "fetch_source",
-        "description": "Fetch one candidate URL privately and classify whether its text is useful for this subtask.",
+        "description": "Fetch one candidate URL privately and classify whether its text is useful for this subtask. This is a L2 escalation tool — prefer search_web snippets (L0) or quick_read (L1) first. Only fetch when you need verbatim text, exact figures, or quote-level evidence that snippets/summary cannot provide. The 'reason' field must justify the escalation.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "url": {"type": "string"},
                 "why_this_source": {"type": "string"},
+                "reason": {
+                    "type": "string",
+                    "description": "Why this source needs L2 fetch (not L0 snippet / L1 quick_read). verbatim_quote=need exact text, numeric_crosscheck=need exact figures, legal_text=need regulatory原文, controversial_claim=needs Critic review, snippet_insufficient=only valid BEFORE any quick_read of this URL.",
+                    "enum": ["verbatim_quote", "numeric_crosscheck", "legal_text", "controversial_claim", "snippet_insufficient"],
+                },
             },
-            "required": ["url"],
+            "required": ["url", "reason"],
         },
         "output_schema": {"type": "object", "properties": {"document": {"type": "object"}}},
         "side_effects": "private subagent memory only",
@@ -127,11 +133,19 @@ RESEARCHER_TOOLS = [
     },
     {
         "name": "fetch_source",
-        "description": "Fetch one candidate URL and classify whether it produced usable raw text.",
+        "description": "Fetch one candidate URL and classify whether it produced usable raw text. L2 escalation — prefer L0 snippet / L1 quick_read first. 'reason' must justify the fetch.",
         "input_schema": {
             "type": "object",
-            "properties": {"url": {"type": "string"}, "why_this_source": {"type": "string"}},
-            "required": ["url"],
+            "properties": {
+                "url": {"type": "string"},
+                "why_this_source": {"type": "string"},
+                "reason": {
+                    "type": "string",
+                    "description": "Why L2 fetch is needed. verbatim_quote/numeric_crosscheck/legal_text/controversial_claim=objective upgrade; snippet_insufficient=only valid BEFORE any quick_read of this URL.",
+                    "enum": ["verbatim_quote", "numeric_crosscheck", "legal_text", "controversial_claim", "snippet_insufficient"],
+                },
+            },
+            "required": ["url", "reason"],
         },
         "output_schema": {
             "type": "object",
@@ -316,6 +330,77 @@ RESEARCHER_TOOLS = [
         "side_effects": "writes suggestion message",
     },
     {
+        "name": "quick_read",
+        "description": (
+            "Fetch a URL and return a compact summary + key points in ONE call. "
+            "Use this for fast-answer questions where you do not need quote-level evidence: "
+            "the URL itself is the provenance. Do NOT use quick_read for sources that need "
+            "verbatim quotes, legal/regulatory text, or cross-critic verification — use "
+            "fetch_source + publish_raw_source for those. quick_read sources are NOT "
+            "visible to Extractor/Critic/Writer; finish_with_answer delivers them directly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "why_this_source": {"type": "string"},
+            },
+            "required": ["url"],
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "source": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "key_points": {"type": "array", "items": {"type": "string"}},
+                        "usable": {"type": "boolean"},
+                    },
+                },
+            },
+        },
+        "side_effects": "records quick-read source locally (not published to Extractor)",
+    },
+    {
+        "name": "finish_with_answer",
+        "description": (
+            "Terminal: deliver a direct answer synthesized from quick_read sources (or prior knowledge "
+            "when explicitly allowed). Skips Extractor/Critic/Writer entirely. Use this for factual, "
+            "news, or explanatory questions where quick_read sources are sufficient. Each source must "
+            "include url and a one-line summary; the answer should cite sources inline as [1], [2], etc. "
+            "Do NOT use this for questions requiring verbatim quotes, regulatory precision, or deep "
+            "cross-verification — use finish_research with published sources for those."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string", "description": "The final answer in markdown. Cite sources inline as [1], [2]."},
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string"},
+                            "title": {"type": "string"},
+                            "summary": {"type": "string"},
+                        },
+                        "required": ["url"],
+                    },
+                    "description": "Sources backing the answer. Order matches [1], [2] citations.",
+                },
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                "reason": {"type": "string", "description": "Why this question is answerable via quick path."},
+            },
+            "required": ["answer", "sources"],
+        },
+        "output_schema": {"type": "object", "properties": {"terminal": {"type": "boolean"}, "report_artifact_id": {"type": "string"}}},
+        "side_effects": "writes quick_answer report artifact and notifies lead for direct delivery",
+    },
+    {
         "name": "finish_research",
         "description": "Stop this Researcher loop when enough raw source material has been published, the path is blocked, or no productive tool call remains.",
         "input_schema": {
@@ -336,6 +421,7 @@ class ResearcherToolState:
     fetched_documents: list[dict[str, Any]] = field(default_factory=list)
     acquisition_failures: list[dict[str, Any]] = field(default_factory=list)
     subagent_findings: list[dict[str, Any]] = field(default_factory=list)
+    quick_read_sources: list[dict[str, Any]] = field(default_factory=list)
     seen_urls: dict[str, dict[str, str]] = field(default_factory=dict)
     created_task_ids: list[str] = field(default_factory=list)
     created_message_ids: list[str] = field(default_factory=list)
@@ -380,6 +466,8 @@ class ResearcherToolHandlers:
             "write_observation": self.write_observation,
             "write_hypothesis": self.write_hypothesis,
             "write_suggestion": self.write_suggestion,
+            "quick_read": self.quick_read,
+            "finish_with_answer": self.finish_with_answer,
             "finish_research": self.finish_research,
         }
 
@@ -396,6 +484,17 @@ class ResearcherToolHandlers:
             "board_summary": _summarize_board_snapshot(snapshot),
             "user_inputs": list(self.task.inputs.get("user_inputs") or []),
         }
+        # For repair tasks, surface the critic's targeted repair directive so
+        # the researcher knows what to fix without losing the original question
+        # context. The question field preserves language/locale; targeted_query
+        # is the specific repair instruction. (Regression for run-run_ac4eb4e41942:
+        # targeted_query drifted from Chinese to English, causing the researcher
+        # to search US DOT sources for a China aviation question.)
+        targeted_query = _safe_text(self.task.inputs.get("targeted_query"))
+        if targeted_query and targeted_query != question:
+            context["targeted_query"] = targeted_query
+            context["must_fix"] = list(self.task.inputs.get("must_fix") or [])
+            context["why_current_evidence_failed"] = _safe_text(self.task.inputs.get("why_current_evidence_failed"))
         self.state.task_context = context
         return {"ok": True, **context}
 
@@ -434,7 +533,9 @@ class ResearcherToolHandlers:
         limit = int(tool_input.get("limit") or 5)
         result = SearchTool().run({"query": query, "limit": limit}, ToolContext(run_id=self.task.run_id, task_id=self.task.task_id))
         raw_results = list(result.data.get("results") or []) if result.ok else []
-        candidates = [_candidate_summary(item) for item in raw_results]
+        candidates = [_candidate_summary(item, query=query) for item in raw_results]
+        existing_urls = {_normalize_document_url(_safe_text(c.get("url"))) for c in self.state.candidate_sources}
+        candidates = _dedupe_candidates(candidates, existing_urls=existing_urls)
         self.state.candidate_sources.extend(candidates)
         return {"ok": result.ok, "query": query, "source_goal": tool_input.get("source_goal"), "candidates": candidates, "diagnostics": result.diagnostics, "error": result.error}
 
@@ -444,6 +545,14 @@ class ResearcherToolHandlers:
         url = _safe_text(tool_input.get("url"))
         if not url:
             return {"ok": False, "error": "fetch_source requires url"}
+        # Contract layer already validated reason is in the enum. Enforce the
+        # stateful ladder here: snippet_insufficient is only self-contradictory
+        # for a URL that has already been quick_read (per-URL, not global —
+        # reading source A at L1 does not prevent fetching source B at L2).
+        quick_read_urls = {_normalize_document_url(s.get("url") or "") for s in self.state.quick_read_sources if s.get("url")}
+        reason_error = _fetch_reason_state_error(tool_input, quick_read_urls)
+        if reason_error is not None:
+            return {"ok": False, "error": reason_error, "failure_kind": "invalid_fetch_reason"}
         normalized_url = _normalize_document_url(url)
         seen = self.state.seen_urls.get(normalized_url)
         if seen and seen.get("status") == "fetched_success":
@@ -858,6 +967,114 @@ class ResearcherToolHandlers:
         self.state.created_message_ids.append(message.message_id or "")
         return {"ok": True, "message_id": message.message_id}
 
+    def quick_read(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        """Fetch a URL and return a compact summary + key points in one call.
+
+        This is the fast path: no Extractor, no quote-level evidence, no Critic.
+        The URL itself is the provenance. The summary is heuristic (head + middle
+        sampling) — no extra model call. Use finish_with_answer to deliver the
+        synthesized answer backed by quick_read sources.
+        """
+        if self.state.task_context is None:
+            return {"ok": False, "error": "read_task first"}
+        url = _safe_text(tool_input.get("url"))
+        if not url:
+            return {"ok": False, "error": "quick_read requires url"}
+        normalized_url = _normalize_document_url(url)
+        # Reuse a prior quick_read result if available.
+        for source in self.state.quick_read_sources:
+            if source.get("normalized_url") == normalized_url:
+                return _quick_read_result({k: v for k, v in source.items() if k != "normalized_url"}, deduped=True)
+        # Also reuse a prior fetch_source document if we already have its text.
+        existing = _find_fetched_document(self.state.fetched_documents, normalized_url)
+        if existing is not None and _safe_text(existing.get("text")):
+            source = _build_quick_read_source(url, existing)
+            self.state.quick_read_sources.append({**source, "normalized_url": normalized_url})
+            return _quick_read_result(source)
+        result = FetchUrlTool().run({"url": url}, ToolContext(run_id=self.task.run_id, task_id=self.task.task_id))
+        if not result.ok:
+            return {
+                "ok": False,
+                "error": result.error or "fetch_failed",
+                "source": {"url": url, "usable": False},
+            }
+        document = dict(result.data)
+        source = _build_quick_read_source(url, document)
+        self.state.quick_read_sources.append({**source, "normalized_url": normalized_url})
+        self.state.seen_urls[normalized_url] = {"status": "fetched_success", "reason": "quick_read", "tool": "quick_read"}
+        return _quick_read_result(source)
+
+    def finish_with_answer(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        """Terminal: deliver a direct answer, bypassing Extractor/Critic/Writer.
+
+        Writes a `report` artifact directly and broadcasts a quick_answer_ready
+        message. The runtime detects the report artifact and terminates the run.
+        This is the fast path for factual/news/explanatory questions.
+        """
+        if self.state.task_context is None:
+            return {"ok": False, "error": "read_task first"}
+        answer = _safe_text(tool_input.get("answer"))
+        if not answer:
+            return {"ok": False, "error": "finish_with_answer requires answer"}
+        raw_sources = list(tool_input.get("sources") or [])
+        if not raw_sources:
+            return {"ok": False, "error": "finish_with_answer requires at least one source"}
+        sources: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_sources, start=1):
+            url = _safe_text(item.get("url")) if isinstance(item, dict) else ""
+            if not url:
+                continue
+            sources.append({
+                "index": index,
+                "url": url,
+                "title": _safe_text(item.get("title")) if isinstance(item, dict) else "",
+                "summary": _safe_text(item.get("summary")) if isinstance(item, dict) else "",
+            })
+        if not sources:
+            return {"ok": False, "error": "finish_with_answer requires at least one source with a url"}
+        confidence = _safe_text(tool_input.get("confidence")) or "medium"
+        reason = _safe_text(tool_input.get("reason")) or "quick-answer path"
+        question = _task_question(self.task)
+        body = _format_quick_answer_report(
+            question=question,
+            answer=answer,
+            sources=sources,
+            confidence=confidence,
+        )
+        artifact = self.artifact_store.write_report(
+            self.task.run_id,
+            source_task_id=self.task.task_id,
+            report_kind="report",
+            body=body,
+            summary=f"quick_answer for {question}",
+        )
+        message = self.mailbox.send(
+            self.task.run_id,
+            from_role=RESEARCHER_ROLE,
+            broadcast=True,
+            message_type="observation",
+            payload={
+                "kind": "quick_answer_ready",
+                "task_id": self.task.task_id,
+                "report_artifact_id": artifact.artifact_id,
+                "source_count": len(sources),
+                "confidence": confidence,
+                "reason": reason,
+            },
+            related_task_id=self.task.task_id,
+        )
+        self.state.created_artifact_ids.append(artifact.artifact_id)
+        self.state.created_message_ids.append(message.message_id or "")
+        self.state.terminal_status = "done"
+        self.state.terminal_reason = f"quick_answer: {reason}"
+        return {
+            "ok": True,
+            "terminal": True,
+            "status": "done",
+            "report_artifact_id": artifact.artifact_id,
+            "source_count": len(sources),
+        }
+
     def finish_research(self, tool_input: dict[str, Any]) -> dict[str, Any]:
         status = _safe_text(tool_input.get("status")) or "blocked"
         if status == "complete":
@@ -936,7 +1153,9 @@ class _ResearchSubagentHandlers:
         limit = min(max(int(tool_input.get("limit") or 5), 1), 6)
         result = SearchTool().run({"query": query, "limit": limit}, ToolContext(run_id=self.parent_task.run_id, task_id=self.parent_task.task_id))
         raw_results = list(result.data.get("results") or []) if result.ok else []
-        candidates = [_candidate_summary(item) for item in raw_results]
+        candidates = [_candidate_summary(item, query=query) for item in raw_results]
+        existing_urls = {_normalize_document_url(_safe_text(c.get("url"))) for c in self.state.candidates}
+        candidates = _dedupe_candidates(candidates, existing_urls=existing_urls)
         self.state.candidates.extend(candidates)
         return {"ok": result.ok, "query": query, "source_goal": tool_input.get("source_goal"), "candidates": candidates, "diagnostics": result.diagnostics, "error": result.error}
 
@@ -944,6 +1163,10 @@ class _ResearchSubagentHandlers:
         url = _safe_text(tool_input.get("url"))
         if not url:
             return {"ok": False, "error": "fetch_source requires url"}
+        # Subagents don't quick_read, so snippet_insufficient stays valid.
+        reason_error = _fetch_reason_state_error(tool_input, set())
+        if reason_error is not None:
+            return {"ok": False, "error": reason_error, "failure_kind": "invalid_fetch_reason"}
         result = FetchUrlTool().run({"url": url}, ToolContext(run_id=self.parent_task.run_id, task_id=self.parent_task.task_id))
         if not result.ok:
             document = {"url": url, "usable": False, "usability_reason": result.error or "fetch_failed"}
@@ -1102,7 +1325,7 @@ def _summarize_board_snapshot(snapshot: dict[str, list[Any]]) -> dict[str, list[
     }
 
 
-def _candidate_summary(item: dict[str, Any]) -> dict[str, Any]:
+def _candidate_summary(item: dict[str, Any], *, query: str = "") -> dict[str, Any]:
     url = _safe_text(item.get("url"))
     title = _safe_text(item.get("title"))
     snippet = _safe_text(item.get("snippet") or item.get("content"))
@@ -1113,7 +1336,87 @@ def _candidate_summary(item: dict[str, Any]) -> dict[str, Any]:
         "source_category": _source_category(url, title, snippet),
         "estimated_fetch_risk": _fetch_risk(url),
         "content_format_hint": _format_hint(url, title, snippet),
+        "priority_hint": _priority_hint(query, title, snippet, url),
     }
+
+
+def _priority_hint(query: str, title: str, snippet: str, url: str) -> str:
+    """Lightweight, non-binding priority signal for the researcher.
+
+    Scores token overlap between the query and (title + snippet). Higher overlap
+    means the candidate is more likely on-topic. This is a HINT only — the
+    researcher decides what to fetch. We never hard-skip low-overlap candidates
+    because SEO-gamed titles can hide high-quality content.
+    """
+    query_tokens = {t for t in re.split(r"\W+", _safe_text(query).lower()) if len(t) > 2}
+    if not query_tokens:
+        return "unknown"
+    text = f"{title} {snippet}".lower()
+    text_tokens = {t for t in re.split(r"\W+", text) if len(t) > 2}
+    if not text_tokens:
+        return "low"
+    overlap = len(query_tokens & text_tokens) / len(query_tokens)
+    if overlap >= 0.6:
+        return "high"
+    if overlap >= 0.3:
+        return "medium"
+    return "low"
+
+
+def _title_ngrams(text: str, n: int = 3) -> set[str]:
+    """Character n-grams over a normalized title; cheap near-duplicate signal."""
+    normalized = re.sub(r"\s+", " ", _safe_text(text)).lower().strip()
+    if len(normalized) < n:
+        return {normalized} if normalized else set()
+    return {normalized[i : i + n] for i in range(len(normalized) - n + 1)}
+
+
+def _title_jaccard(a: str, b: str) -> float:
+    sa, sb = _title_ngrams(a), _title_ngrams(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def _dedupe_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    existing_urls: set[str] | None = None,
+    title_threshold: float = 0.8,
+) -> list[dict[str, Any]]:
+    """Drop near-duplicate search candidates before the researcher sees them.
+
+    Two candidates are considered duplicates when:
+      - their normalized URLs match (exact), or
+      - their normalized titles share >= title_threshold n-gram jaccard.
+
+    The first occurrence wins; later duplicates are dropped. This is a
+    high-threshold near-duplicate filter — it catches syndicated copies and
+    search-engine mirror results, never semantically-similar-but-distinct
+    sources (which are corroboration, not duplication).
+    """
+    seen_urls: set[str] = set(existing_urls or ())
+    seen_title_grams: list[set[str]] = []
+    kept: list[dict[str, Any]] = []
+    for candidate in candidates:
+        url = _safe_text(candidate.get("url"))
+        normalized = _normalize_document_url(url)
+        if normalized in seen_urls:
+            continue
+        title = _safe_text(candidate.get("title"))
+        grams = _title_ngrams(title)
+        if grams and any(_set_jaccard(grams, prev) >= title_threshold for prev in seen_title_grams):
+            continue
+        seen_urls.add(normalized)
+        seen_title_grams.append(grams)
+        kept.append(candidate)
+    return kept
+
+
+def _set_jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
 
 
 def _source_category(url: str, title: str, snippet: str) -> str:
@@ -1482,6 +1785,49 @@ def _safe_text(value: Any) -> str:
     return str(value).strip()
 
 
+# Objective (always-valid) vs subjective (state-gated) reasons for L2 fetch.
+# Contract layer enforces enum membership; the handler enforces the STATEFUL
+# constraint: snippet_insufficient is only valid for a URL that has NOT been
+# quick_read — once you've quick_read a specific source, "snippet insufficient"
+# is semantically self-contradictory for THAT URL (you're not looking at a
+# snippet anymore). This is per-URL, not global: reading source A at L1 does
+# not prevent fetching source B at L2 with snippet_insufficient, because B's
+# snippet is genuinely all the model has seen of B.
+_FETCH_OBJECTIVE_REASONS = frozenset({
+    "verbatim_quote",
+    "numeric_crosscheck",
+    "legal_text",
+    "controversial_claim",
+})
+_FETCH_REASON_SUBJECTIVE = "snippet_insufficient"
+
+
+def _fetch_reason_state_error(tool_input: dict[str, Any], quick_read_urls: set[str]) -> str | None:
+    """Stateful gate on fetch_source reason. Returns error message or None.
+
+    Precondition: contract layer already validated reason is in the enum and
+    non-empty. This function only checks the state-dependent constraint:
+    `snippet_insufficient` is rejected if the TARGET URL has already been
+    quick_read — because at that point the model has seen L1 content for that
+    exact source and must use an objective reason to escalate it further.
+    Other URLs' quick_read state is irrelevant (per-URL ladder, not global).
+    """
+    reason = _safe_text(tool_input.get("reason")).lower()
+    if reason != _FETCH_REASON_SUBJECTIVE:
+        return None  # objective reasons are always allowed
+    target_url = _normalize_document_url(_safe_text(tool_input.get("url")))
+    # snippet_insufficient: only valid for a URL the model has NOT quick_read.
+    # Per-URL: reading A at L1 doesn't block fetching B at L2 with this reason.
+    if target_url and target_url in quick_read_urls:
+        return (
+            f"reason 'snippet_insufficient' is not valid for a URL you have already quick_read "
+            f"({target_url}); you've seen its L1 content, so 'snippet insufficient' is "
+            f"self-contradictory. To escalate this source to L2 fetch, use an objective reason "
+            f"(one of {sorted(_FETCH_OBJECTIVE_REASONS)}) explaining what verbatim/exact evidence you need."
+        )
+    return None
+
+
 def _text_preview(value: Any, *, size: int = 1800) -> str:
     """Sample a representative slice of the document text for the model.
 
@@ -1497,3 +1843,126 @@ def _text_preview(value: Any, *, size: int = 1800) -> str:
     mid_start = max(head, (len(text) - size) // 2 + head // 2)
     mid_end = min(len(text), mid_start + (size - head))
     return text[:head] + "\n…[middle sample]…\n" + text[mid_start:mid_end]
+
+
+def _quick_read_result(source: dict[str, Any], *, deduped: bool = False) -> dict[str, Any]:
+    """Wrap a quick_read source with a fast_path_ready convergence signal.
+
+    When the source is usable and has enough content, signal the model to
+    converge to finish_with_answer instead of continuing to fetch_source.
+    """
+    usable = bool(source.get("usable"))
+    has_content = bool(_safe_text(source.get("summary")) or source.get("key_points"))
+    fast_path_ready = usable and has_content
+    result: dict[str, Any] = {
+        "ok": True,
+        "source": source,
+        "fast_path_ready": fast_path_ready,
+    }
+    if deduped:
+        result["deduped"] = True
+    if fast_path_ready:
+        result["required_next_step"] = (
+            "You now have a usable quick_read source. Call finish_with_answer with the answer "
+            "synthesized from this source (and any prior quick_read sources). Do NOT call "
+            "fetch_source or quick_read again unless this source is insufficient."
+        )
+    return result
+
+
+def _build_quick_read_source(url: str, document: dict[str, Any]) -> dict[str, Any]:
+    """Build a compact summary + key_points from a fetched document.
+
+    Heuristic only — no model call. The summary is a head+middle sample of the
+    text; key_points are the first few non-trivial sentences. This trades
+    precision for speed: the model reads the summary in-context and synthesizes
+    the final answer via finish_with_answer.
+
+    Reuses _classify_page so the fast path inherits the same blocked/modal/
+    boilerplate guards as fetch_source — prevents low-signal pages (Cartier-style
+    shells, captcha walls) from slipping through as usable quick_read sources.
+    """
+    text = _safe_text(document.get("text"))
+    title = _safe_text(document.get("title"))
+    if not text:
+        return {
+            "url": url,
+            "title": title,
+            "summary": "",
+            "key_points": [],
+            "usable": False,
+            "usability_reason": "no_text",
+            "page_type": "empty",
+        }
+    page_profile = _classify_page(document, url)
+    if not page_profile["likely_extractable"]:
+        return {
+            "url": url,
+            "title": title,
+            "summary": _text_preview(text, size=400),
+            "key_points": [],
+            "usable": False,
+            "usability_reason": page_profile["reason"],
+            "page_type": page_profile["page_type"],
+            "acquisition_pressure": {"recommended_escalation": "browser_agent" if page_profile["page_type"] in {"blocked", "spa_shell"} else None},
+        }
+    summary = _text_preview(text, size=1200)
+    # Extract up to 5 key points: first sentences >= 40 chars, skipping boilerplate.
+    key_points: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if len(line) < 40:
+            continue
+        # Skip obvious boilerplate lines.
+        lower = line.lower()
+        if any(marker in lower for marker in ("cookie", "javascript", "subscribe", "newsletter", "privacy policy", "all rights reserved", "copyright")):
+            continue
+        # Take the first sentence-ish chunk.
+        sentence = line.split("。")[0].split(". ")[0].split("!")[0].split("?")[0]
+        if len(sentence) >= 40:
+            key_points.append(sentence[:200])
+        if len(key_points) >= 5:
+            break
+    return {
+        "url": url,
+        "title": title,
+        "summary": summary,
+        "key_points": key_points,
+        "usable": True,
+        "usability_reason": page_profile["reason"],
+        "page_type": page_profile["page_type"],
+    }
+
+
+def _format_quick_answer_report(
+    *,
+    question: str,
+    answer: str,
+    sources: list[dict[str, Any]],
+    confidence: str,
+) -> str:
+    """Format the quick-answer report body as markdown.
+
+    The answer is the model's synthesis (already cites [1], [2] inline). We
+    append a sources section mapping the inline citations to URLs, plus a
+    confidence marker. This is the final deliverable — no Writer pass.
+    """
+    lines: list[str] = [f"# {question}", ""]
+    lines.append(answer.strip())
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 来源")
+    lines.append("")
+    for source in sources:
+        title = _safe_text(source.get("title")) or _safe_text(source.get("url"))
+        summary = _safe_text(source.get("summary"))
+        url = _safe_text(source.get("url"))
+        if summary:
+            lines.append(f"[{source['index']}] [{title}]({url}) — {summary}")
+        else:
+            lines.append(f"[{source['index']}] [{title}]({url})")
+    lines.append("")
+    lines.append(f"**置信度**: {confidence}  ")
+    lines.append("*快速回答路径：未经过逐字证据抽取与 Critic 交叉验证。*")
+    return "\n".join(lines)

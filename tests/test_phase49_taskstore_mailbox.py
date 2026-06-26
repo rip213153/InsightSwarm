@@ -27,15 +27,16 @@ def test_taskstore_claim_heartbeat_complete(tmp_path: Path) -> None:
         inputs={"question": "DeepSeek"},
     )
     claimed = task_store.claim_next(run_state.run_id, owner_role="lead")
-    heartbeated = task_store.heartbeat(created.task_id)
+    renewed = task_store.renew_lease_if_leased(created.task_id)
+    after_renew = store.get_swarm_task(created.task_id)
     completed = task_store.complete(created.task_id)
 
     assert claimed is not None
     assert claimed.task_id == created.task_id
     assert claimed.status == "leased"
     assert claimed.lease_until is not None
-    assert heartbeated.status == "leased"
-    assert heartbeated.lease_until is not None
+    assert renewed is True  # leased task was renewed, not resurrected
+    assert after_renew.status == "leased"  # renew kept it leased, extended lease
     assert completed.status == "done"
 
 

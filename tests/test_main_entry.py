@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import main
 from insightswarm.models.router import build_model_client
 
@@ -32,7 +30,7 @@ def test_startup_banner_shows_runtime_identity(monkeypatch, tmp_path) -> None:
     assert "/ask <question>" in banner
 
 
-def test_main_model_command_sets_environment(monkeypatch, capsys) -> None:
+def test_main_model_command_sets_active_model(monkeypatch, capsys) -> None:
     monkeypatch.setattr(main, "_discover_model_config", lambda repo_root: None)
 
     code = main.main(["/model", "qwen3.7-plus"])
@@ -40,7 +38,6 @@ def test_main_model_command_sets_environment(monkeypatch, capsys) -> None:
     output = capsys.readouterr().out
     assert code == 0
     assert "model set to qwen3.7-plus" in output
-    assert os.environ["INSIGHTSWARM_QWEN_TEXT_MODEL"] == "qwen3.7-plus"
 
 
 def test_main_ask_requires_model_before_running(monkeypatch, capsys) -> None:

@@ -157,8 +157,8 @@ def test_researcher_dedupes_repeated_normalized_url_fetch_and_publish(tmp_path: 
     )
 
     handlers.read_task({})
-    first = handlers.fetch_source({"url": "https://example.com/path/"})
-    second = handlers.fetch_source({"url": "https://example.com/path"})
+    first = handlers.fetch_source({"url": "https://example.com/path/", "reason": "snippet_insufficient"})
+    second = handlers.fetch_source({"url": "https://example.com/path", "reason": "snippet_insufficient"})
     publish = handlers.publish_raw_source({"document_urls": ["https://example.com/path"], "why_ready": "usable"})
     republish = handlers.publish_raw_source({"document_urls": ["https://example.com/path/"], "why_ready": "usable again"})
 

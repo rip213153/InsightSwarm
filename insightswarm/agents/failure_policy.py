@@ -29,6 +29,17 @@ def normalize_agent_failure(*, status: str | None, reason: str | None) -> AgentF
             should_trigger_critic_review=False,
             should_trigger_research_repair=False,
         )
+    if normalized_status == "worker_exception":
+        # Uncaught exception in a worker's task body. Crashes are technical,
+        # not content failures: retrying may succeed, and they must not masquerade
+        # as "blocked" (which triggers critic review / research repair).
+        return AgentFailure(
+            category="technical",
+            reason=normalized_reason or "worker raised an uncaught exception",
+            retryable=True,
+            should_trigger_critic_review=False,
+            should_trigger_research_repair=False,
+        )
     if "timed out" in lowered_reason or "timeout" in lowered_reason:
         return AgentFailure(
             category="technical",
@@ -38,6 +49,14 @@ def normalize_agent_failure(*, status: str | None, reason: str | None) -> AgentF
             should_trigger_research_repair=False,
         )
     if normalized_status == "blocked" and "safety cap" in lowered_reason:
+        return AgentFailure(
+            category="technical",
+            reason=normalized_reason,
+            retryable=False,
+            should_trigger_critic_review=False,
+            should_trigger_research_repair=False,
+        )
+    if normalized_status == "blocked" and "no-op spin" in lowered_reason:
         return AgentFailure(
             category="technical",
             reason=normalized_reason,

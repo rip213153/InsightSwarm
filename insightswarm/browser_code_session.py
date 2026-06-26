@@ -82,6 +82,9 @@ class BrowserCodeSession:
             if getattr(model_result, "status", "") != "ok":
                 last_result = {"ok": False, "error": getattr(model_result, "error", None) or "model failed"}
                 self._append_cell(index, "", False, "", last_result["error"], model_text)
+                if _is_nonrecoverable_model_error(last_result["error"]):
+                    self.handlers._finish_browser("blocked", f"Browser model unavailable: {last_result['error'][:500]}")
+                    break
                 continue
             code = _extract_code_cell(model_text)
             if not code:
@@ -213,3 +216,25 @@ def _extract_code_cell(text: str) -> str:
             return ""
         return str(payload.get("code") or "").strip()
     return ""
+
+
+def _is_nonrecoverable_model_error(error: Any) -> bool:
+    lowered = str(error or "").lower()
+    if not lowered:
+        return False
+    return any(
+        marker in lowered
+        for marker in (
+            "http 401",
+            "http 403",
+            "http 429",
+            "quota",
+            "free tier",
+            "freetieronly",
+            "insufficient",
+            "balance",
+            "unauthorized",
+            "forbidden",
+            "rate limit",
+        )
+    )

@@ -7,6 +7,7 @@ from threading import Event
 from typing import Any
 
 from insightswarm.agents.agent_loop import AgentLoopState, run_agent_loop
+from insightswarm.agents.execution_cell import run_in_cell, run_supervised_once
 from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
@@ -233,18 +234,29 @@ class WriterWorker:
         self.artifact_store = artifact_store
         self.board_store = board_store or BoardStore(task_store.store)
 
-    def run_once(self, run_id: str, *, model_client: object | None = None) -> WriterWorkResult | None:
+    def run_once(self, run_id: str, *, model_client: object | None = None, run_root: Path | None = None) -> WriterWorkResult | None:
         run_state = self.task_store.store.get_swarm_run_state(run_id)
         if not run_state.delivery_gate or run_state.phase != "delivery":
             return None
         task = self.task_store.claim_next(run_id, owner_role="writer")
         if task is None:
             return None
-        result = self._process_task(task, model_client=model_client)
-        current = self.task_store.store.get_swarm_task(task.task_id)
-        if current.status in {"pending", "leased"}:
-            self.task_store.complete(task.task_id)
-        return result
+        def _body(claimed: Task) -> WriterWorkResult:
+            result = self._process_task(claimed, model_client=model_client)
+            current = self.task_store.store.get_swarm_task(claimed.task_id)
+            if current.status in {"pending", "leased"}:
+                self.task_store.complete(claimed.task_id)
+            return result
+
+        return run_in_cell(
+            task_store=self.task_store,
+            mailbox=self.mailbox,
+            task=task,
+            role="writer",
+            run_root=run_root,
+            body=_body,
+            make_failure_result=lambda failed: WriterWorkResult(claimed_task_id=failed.task_id or ""),
+        )
 
     def _process_task(self, task: Task, *, model_client: object | None = None) -> WriterWorkResult:
         context = self._assemble_context(task)
@@ -403,11 +415,16 @@ class WriterWorker:
         poll_interval: float = 0.2,
         model_client: object | None = None,
         max_iterations: int | None = None,
+        run_root: Path | None = None,
     ) -> list[WriterWorkResult]:
         results: list[WriterWorkResult] = []
 
         while not stop_event.is_set():
-            result = self.run_once(run_id, model_client=model_client)
+            result = run_supervised_once(
+                stop_event=stop_event,
+                poll_interval=poll_interval,
+                call_once=lambda: self.run_once(run_id, model_client=model_client, run_root=run_root),
+            )
             if result is None:
                 stop_event.wait(poll_interval)
                 continue

@@ -330,3 +330,117 @@ def test_critic_terminal_tools_record_review_basis(tmp_path: Path) -> None:
     payload = mailbox.inbox(run_state.run_id, role="lead")[-1].payload
     assert payload["review_basis"]["review_disposition"] == "pass_with_caveats"
     assert payload["review_basis"]["source_concentration"] == "single_source"
+
+
+def test_critic_review_basis_accepts_non_whitelist_fields(tmp_path: Path) -> None:
+    """review_basis must accept any non-empty dict, not just whitelist fields.
+
+    Regression for run-run_ac4eb4e41942 (2026-06-23): the model filled
+    verdict/reason/confidence (reasonable fields), but _review_basis() had a
+    whitelist that excluded them, returning {} and causing every terminal tool
+    to retry forever with missing_review_basis=True.
+    """
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    board_store = BoardStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="Non-whitelist review_basis test",
+        budget={"max_steps": 12},
+        phase="review",
+    )
+    review_task = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="leased",
+        owner_role="critic",
+        inputs={"evidence_scope": "run", "evidence_ids": [], "question": run_state.objective},
+        created_by="test",
+    )
+    handlers = CriticToolHandlers(
+        task=review_task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=board_store,
+        state=CriticToolState(),
+    )
+    # Model fills verdict/reason/confidence — NOT in the old whitelist.
+    review_basis = {
+        "verdict": "repair",
+        "reason": "No usable evidence for the question.",
+        "confidence": 0.95,
+        "review_type": "evidence_review",
+    }
+
+    result = handlers.request_repair(
+        {
+            "targeted_query": "find a source covering the question",
+            "must_fix": ["need quote-backed evidence"],
+            "why_current_evidence_failed": "nothing usable",
+            "review_basis": review_basis,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["repair_created"] is True
+    repair_task = store.get_swarm_task(result["repair_task_id"])
+    # The full review_basis must be preserved, including non-whitelist fields.
+    assert repair_task.inputs["review_basis"]["verdict"] == "repair"
+    assert repair_task.inputs["review_basis"]["confidence"] == 0.95
+
+
+def test_critic_repair_task_inherits_original_question(tmp_path: Path) -> None:
+    """Repair task must carry the original review question so researcher keeps language/locale.
+
+    Regression for run-run_ac4eb4e41942 (2026-06-23): critic's targeted_query
+    drifted from Chinese "2026年中国航空燃油费调整" to English "Find a source
+    covering fuel surcharge policy changes in 2026", causing the researcher to
+    search US DOT/FMCSA sources for a China aviation question.
+    """
+    store = _build_store(tmp_path)
+    task_store = TaskStore(store)
+    mailbox = Mailbox(store)
+    artifact_store = ArtifactStore(store)
+    board_store = BoardStore(store)
+    run_state = store.create_swarm_run_state(
+        objective="2026年中国航空燃油费为什么屡次提高",
+        budget={"max_steps": 12},
+        phase="review",
+    )
+    original_question = "2026年中国航空燃油费为什么屡次提高"
+    review_task = task_store.create(
+        run_state.run_id,
+        kind="evidence_review",
+        status="leased",
+        owner_role="critic",
+        inputs={"evidence_scope": "run", "evidence_ids": [], "question": original_question},
+        created_by="test",
+    )
+    handlers = CriticToolHandlers(
+        task=review_task,
+        task_store=task_store,
+        mailbox=mailbox,
+        artifact_store=artifact_store,
+        board_store=board_store,
+        state=CriticToolState(),
+    )
+    # Critic writes targeted_query in English (semantic drift).
+    drifted_query = "Find a source covering fuel surcharge policy changes in 2026"
+
+    result = handlers.request_repair(
+        {
+            "targeted_query": drifted_query,
+            "must_fix": ["need a source covering 2026 fuel surcharge changes"],
+            "why_current_evidence_failed": "document was from 2022",
+            "review_basis": {"verdict": "repair", "reason": "temporal mismatch"},
+        }
+    )
+
+    assert result["ok"] is True
+    repair_task = store.get_swarm_task(result["repair_task_id"])
+    # The original Chinese question must be preserved in the repair task.
+    assert repair_task.inputs["question"] == original_question
+    # The drifted targeted_query is also kept as the specific repair directive.
+    assert repair_task.inputs["targeted_query"] == drifted_query

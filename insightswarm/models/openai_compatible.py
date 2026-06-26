@@ -128,7 +128,7 @@ class OpenAICompatibleClient:
         raw: dict[str, Any] = {}
         for attempt in range(max_retries + 1):
             request = urllib.request.Request(
-                f"{self.base_url}/chat/completions",
+                self._chat_completions_url(),
                 data=request_body,
                 headers={
                     "Authorization": f"Bearer {api_key}",
@@ -192,6 +192,11 @@ class OpenAICompatibleClient:
 
     def _should_retry_status(self, status_code: int) -> bool:
         return status_code == 429 or 500 <= status_code < 600
+
+    def _chat_completions_url(self) -> str:
+        if self.base_url.endswith("/chat/completions"):
+            return self.base_url
+        return f"{self.base_url}/chat/completions"
 
     def _retry_delay(self, exc: urllib.error.HTTPError | None, attempt: int) -> float:
         if exc is not None:

@@ -6,6 +6,7 @@ from threading import Event
 from typing import Any
 
 from insightswarm.agents.agent_loop import AgentLoopState, run_agent_loop
+from insightswarm.agents.execution_cell import run_in_cell, run_supervised_once
 from insightswarm.agents.extractor_tools import CRITIC_ROLE, EXTRACTOR_ROLE, EXTRACTOR_TOOLS, ExtractorToolHandlers, ExtractorToolState
 from insightswarm.agents.failure_policy import normalize_agent_failure
 from insightswarm.agents.tool_executor import ToolExecutor
@@ -38,11 +39,20 @@ class Extractor:
         *,
         model_client: object | None = None,
         trace_path: Path | None = None,
+        run_root: Path | None = None,
     ) -> ExtractorResult | None:
         task = self.task_store.claim_next(run_id, owner_role=EXTRACTOR_ROLE)
         if task is None:
             return None
-        return self.run_task(task, model_client=model_client, trace_path=trace_path)
+        return run_in_cell(
+            task_store=self.task_store,
+            mailbox=self.mailbox,
+            task=task,
+            role=EXTRACTOR_ROLE,
+            run_root=run_root,
+            body=lambda claimed: self.run_task(claimed, model_client=model_client, trace_path=trace_path),
+            make_failure_result=lambda failed: ExtractorResult(claimed_task_id=failed.task_id or ""),
+        )
 
     def run_forever(
         self,
@@ -53,10 +63,17 @@ class Extractor:
         model_client: object | None = None,
         max_iterations: int | None = None,
         trace_path: Path | None = None,
+        run_root: Path | None = None,
     ) -> list[ExtractorResult]:
         results: list[ExtractorResult] = []
         while not stop_event.is_set():
-            result = self.run_once(run_id, model_client=model_client, trace_path=trace_path)
+            result = run_supervised_once(
+                stop_event=stop_event,
+                poll_interval=poll_interval,
+                call_once=lambda: self.run_once(
+                    run_id, model_client=model_client, trace_path=trace_path, run_root=run_root
+                ),
+            )
             if result is None:
                 stop_event.wait(poll_interval)
                 continue

@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_ask.add_argument("--browser-backend", default="visible")
     run_ask.add_argument("--browser-cdp-url", default=None)
     run_ask.add_argument("--input-file", action="append", default=[], help="Attach an image, audio, or other local file as user-provided run context.")
+    run_ask.add_argument("--model", default=None, help="Override the text model name for this run.")
     run_ask.add_argument("--json", action="store_true")
 
     run_smoke = run_sub.add_parser("smoke")
@@ -155,11 +156,11 @@ def main(argv: list[str] | None = None) -> int:
                 "or use python main.py / .\\ask.ps1 for environment-based quick runs."
             ) from exc
         except HumanAuthorizationRequired as exc:
-            print(f"HumanAuthorizationRequired: {exc}", file=__import__("sys").stderr)
+            print(f"HumanAuthorizationRequired: {exc}", file=sys.stderr)
             raise
         payload = result.to_dict()
         if payload["stop_reason"] == "human_required":
-            print("HumanAuthorizationRequired", file=__import__("sys").stderr)
+            print("HumanAuthorizationRequired", file=sys.stderr)
             if not args.json:
                 result = _authorize_and_resume_if_allowed(
                     store,
@@ -197,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_drain_seconds=args.max_drain_seconds,
                 browser_backend=args.browser_backend,
                 browser_cdp_url=args.browser_cdp_url,
+                model=args.model,
             )
         except KeyError as exc:
             raise SystemExit(f"cannot resume: {exc}") from exc
@@ -237,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.resource == "eval":
         return _handle_eval(args, settings, store)
 
-    raise AssertionError("unreachable")
+    raise SystemExit(f"unhandled command: {args.resource} {args.action}")
 
 
 def _handle_eval(args: argparse.Namespace, settings: object, store: Store) -> int:
@@ -361,7 +363,7 @@ def _handle_eval(args: argparse.Namespace, settings: object, store: Store) -> in
         print(f"recorded human review for {args.epoch_id}")
         return 0
 
-    raise AssertionError("unreachable")
+    raise SystemExit(f"unhandled eval action: {args.action}")
 
 
 def _build_eval_judge_client(args: argparse.Namespace, settings: object) -> object:
