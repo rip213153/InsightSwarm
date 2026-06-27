@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 import re
+import unicodedata
 
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
+from insightswarm.tools.url_utils import is_valid_url
 
 
 EXTRACTOR_ROLE = "extractor"
@@ -231,6 +233,19 @@ class ExtractorToolHandlers:
         source_url = _source_url(document)
         if not source_url:
             return {"ok": False, "error": "document is missing source_url"}
+        # Reject truncated/malformed source URLs before creating citations.
+        # Uses the same syntactic validator as fetch.py/firecrawl.py so a
+        # snippet-truncated URL (e.g. "https://example.com/foo...") can never
+        # become a citation's provenance. This is a hard block — the extractor
+        # must request_better_source instead.
+        #
+        # The `browser` scheme is allowed alongside http/https because
+        # BrowserAgent publishes raw documents with `browser://captured`
+        # provenance when a page has no canonical URL — that is a legitimate
+        # citation source, not a fetchable endpoint, and must not be rejected
+        # by the http/https-only check that gates the fetcher.
+        if not is_valid_url(source_url, allow_schemes=("http", "https", "browser")):
+            return {"ok": False, "error": f"document source_url failed validation: {source_url!r}"}
         accepted = []
         seen: set[str] = set()
         for item in list(tool_input.get("candidates") or [])[:5]:
@@ -621,7 +636,24 @@ def _tokens(value: str) -> set[str]:
 
 
 def _normalize_for_backcheck(value: str) -> str:
-    return re.sub(r"\s+", " ", _safe_text(value)).lower()
+    """Normalize text for deterministic quote backcheck.
+
+    Uses NFKC compatibility normalization so that visually-identical strings
+    from different sources compare equal:
+      - fullwidth "Ｑ３" → "Q3"
+      - ligature "ﬁ" → "fi"
+      - superscript "²" → "2"
+      - non-breaking spaces become regular spaces
+      - CJK compatibility ideographs decompose to their canonical form
+
+    This is stronger than the old strip+lower: it catches copies that differ
+    only in compatibility form (e.g. a snippet pasted from a PDF with fullwidth
+    digits vs the same quote in the page text with ASCII digits). After NFKC
+    we still collapse whitespace and lowercase, so existing callers that
+    compared ASCII text see no behavioral change.
+    """
+    nfkc = unicodedata.normalize("NFKC", _safe_text(value))
+    return re.sub(r"\s+", " ", nfkc).lower()
 
 
 def _quote_ngrams(text: str, n: int = 4) -> set[str]:
@@ -629,9 +661,12 @@ def _quote_ngrams(text: str, n: int = 4) -> set[str]:
 
     Punctuation is stripped before tokenization so that "earnings." and "earnings"
     produce identical n-grams. This prevents syndicated copies that differ only in
-    punctuation from escaping the near-duplicate filter.
+    punctuation from escaping the near-duplicate filter. NFKC normalization is
+    applied first so that fullwidth/superscript/ligature variants tokenize
+    identically to their canonical forms.
     """
-    normalized = re.sub(r"\s+", " ", _safe_text(text)).lower().strip()
+    normalized = unicodedata.normalize("NFKC", _safe_text(text)).lower().strip()
+    normalized = re.sub(r"\s+", " ", normalized)
     # Strip punctuation so "Q3." and "Q3" tokenize identically.
     normalized = re.sub(r"[^\w\s]", " ", normalized)
     tokens = [t for t in normalized.split() if t]

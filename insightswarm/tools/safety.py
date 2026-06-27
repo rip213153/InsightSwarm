@@ -4,12 +4,24 @@ import ipaddress
 from urllib.parse import urlparse
 
 from insightswarm.tools.core import ToolContext, ToolResult
+from insightswarm.tools.url_utils import UrlValidationError, validate_url
 
 
 ALLOWED_URL_SCHEMES = ("http", "https")
 
 
 def validate_public_http_url(url: str, context: ToolContext | None = None) -> ToolResult | None:
+    # Syntactic checks first: scheme presence, ellipsis/truncation markers,
+    # non-http(s) schemes. Centralized in url_utils so fetch/firecrawl/extractor
+    # all apply the same rule set.
+    try:
+        validate_url(url)
+    except UrlValidationError as exc:
+        return ToolResult(
+            "blocked",
+            error=str(exc) or "URL failed validation",
+            diagnostics={"url": url},
+        )
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_URL_SCHEMES:
         return ToolResult(
