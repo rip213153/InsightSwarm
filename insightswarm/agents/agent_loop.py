@@ -775,7 +775,7 @@ def _next_private_state(turn: dict[str, Any], previous_state: dict[str, Any] | N
     # model via the model_error tool_result (history layer), not private_state
     # (reasoning layer). Mirrors V3's separation: tool results live in history,
     # reasoning lives in prefix/memory — they don't bleed into each other.
-    if _safe_text(turn.get("stop_reason")) in {"model_error", "model_rate_limited"} and previous_state:
+    if _safe_text(turn.get("stop_reason")) in {"model_error", "model_rate_limited", "model_no_tool", "invalid_json"} and previous_state:
         return dict(previous_state)
     return {
         "current_understanding": _safe_text(turn.get("current_understanding")) or _safe_text(turn.get("assistant_text")),
