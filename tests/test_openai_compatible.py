@@ -8,6 +8,9 @@ from insightswarm.models.openai_compatible import OpenAICompatibleClient
 
 def test_incomplete_read_returns_model_error(monkeypatch):
     monkeypatch.setenv("TEST_MODEL_API_KEY", "key")
+    # tenacity retries with exponential backoff (1s, 2s, 4s); skip the sleeps
+    # so the test stays fast while still exercising the retry-then-fail path.
+    monkeypatch.setattr("time.sleep", lambda *args, **kwargs: None)
 
     def _raise_incomplete_read(*args, **kwargs):
         raise http.client.IncompleteRead(b"", 4737)

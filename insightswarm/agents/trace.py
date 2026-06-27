@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+import orjson
 
 from insightswarm.agents.agent_loop import AgentLoopState
 from insightswarm.schemas.swarm import Task
@@ -28,7 +29,7 @@ def build_tool_trace_callback(trace_path: Path | None, *, role: str, task: Task)
         if role == "critic":
             record["critic_review_state"] = _critic_review_state(loop_state.private_state)
         with trace_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            handle.write(orjson.dumps(record, default=str).decode("utf-8") + "\n")
 
     return _write
 

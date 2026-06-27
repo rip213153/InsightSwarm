@@ -3,7 +3,12 @@ name = "insightswarm"
 version = "0.1.0"
 description = "AI-driven competitive analysis agent collaboration system"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "pyyaml>=6.0",
+  "python-dotenv>=1.0",
+  "tenacity>=8.0",
+  "orjson>=3.10",
+]
 
 [project.optional-dependencies]
 browser = ["websocket-client>=1.8"]

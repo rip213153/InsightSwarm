@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import base64
-import http.client
 import json
 import os
-import socket
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
+import orjson
+from tenacity import (
+    Retrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
+
 from insightswarm.models.clients import ModelResult
+from insightswarm.tools.http_utils import HttpRequestError, HttpResponseError, request_json
 
 
 class OpenAICompatibleConfigError(RuntimeError):
@@ -36,6 +41,15 @@ def _json_from_text(text: str) -> dict[str, Any] | None:
             except json.JSONDecodeError:
                 return None
     return None
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry network errors and HTTP 429/5xx; let other HTTP errors bubble up."""
+    if isinstance(exc, HttpRequestError):
+        return True
+    if isinstance(exc, HttpResponseError):
+        return exc.status_code == 429 or 500 <= exc.status_code < 600
+    return False
 
 
 class OpenAICompatibleClient:
@@ -123,56 +137,39 @@ class OpenAICompatibleClient:
         if temperature is not None:
             payload["temperature"] = temperature
         started = time.perf_counter()
-        request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        max_retries = 3
-        raw: dict[str, Any] = {}
-        for attempt in range(max_retries + 1):
-            request = urllib.request.Request(
+        # Hand-written retry loop (formerly ~80 lines) replaced by tenacity:
+        # 3 retries with exponential backoff (1s, 2s, 4s) on network errors and
+        # HTTP 429/5xx. See git history for the original inline implementation.
+        retrying = Retrying(
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=1, max=4),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
+        )
+        try:
+            raw = retrying(
+                request_json,
                 self._chat_completions_url(),
-                data=request_body,
+                method="POST",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                method="POST",
+                body=payload,
+                timeout=self.timeout_seconds,
             )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    raw = json.loads(response.read().decode("utf-8"))
-                break
-            except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")
-                status_code = exc.code
-                if attempt < max_retries and self._should_retry_status(status_code):
-                    time.sleep(self._retry_delay(exc, attempt))
-                    continue
-                return self._error_result(
-                    f"OpenAI-compatible API HTTP {status_code}: {detail[:500]}",
-                    started,
-                    {"http_status": status_code},
-                )
-            except urllib.error.URLError as exc:
-                if attempt < 1:
-                    time.sleep(self._retry_delay(None, attempt))
-                    continue
-                return self._error_result(f"OpenAI-compatible API request failed: {exc.reason}", started)
-            except (TimeoutError, socket.timeout) as exc:
-                if attempt < 1:
-                    time.sleep(self._retry_delay(None, attempt))
-                    continue
-                return self._error_result(f"OpenAI-compatible API request timed out: {exc}", started)
-            except http.client.IncompleteRead as exc:
-                if attempt < 1:
-                    time.sleep(self._retry_delay(None, attempt))
-                    continue
-                return self._error_result(f"OpenAI-compatible API response incomplete: {exc}", started)
-            except (ConnectionResetError, OSError) as exc:
-                if attempt < 1:
-                    time.sleep(self._retry_delay(None, attempt))
-                    continue
-                return self._error_result(f"OpenAI-compatible API connection failed: {exc}", started)
-            except json.JSONDecodeError as exc:
-                return self._error_result(f"OpenAI-compatible API returned invalid JSON: {exc}", started)
+        except HttpResponseError as exc:
+            return self._error_result(
+                f"OpenAI-compatible API HTTP {exc.status_code}: {exc.body[:500]}",
+                started,
+                {"http_status": exc.status_code},
+            )
+        except HttpRequestError as exc:
+            return self._error_result(f"OpenAI-compatible API request failed: {exc}", started)
+        except (orjson.JSONDecodeError, json.JSONDecodeError) as exc:
+            return self._error_result(f"OpenAI-compatible API returned invalid JSON: {exc}", started)
+        if not isinstance(raw, dict):
+            raw = {}
         latency_ms = int((time.perf_counter() - started) * 1000)
         choice = (raw.get("choices") or [{}])[0]
         message = choice.get("message") or {}
@@ -190,23 +187,10 @@ class OpenAICompatibleClient:
             status="ok",
         )
 
-    def _should_retry_status(self, status_code: int) -> bool:
-        return status_code == 429 or 500 <= status_code < 600
-
     def _chat_completions_url(self) -> str:
         if self.base_url.endswith("/chat/completions"):
             return self.base_url
         return f"{self.base_url}/chat/completions"
-
-    def _retry_delay(self, exc: urllib.error.HTTPError | None, attempt: int) -> float:
-        if exc is not None:
-            retry_after = exc.headers.get("Retry-After") or exc.headers.get("retry-after")
-            if retry_after:
-                try:
-                    return min(float(retry_after), 20.0)
-                except ValueError:
-                    pass
-        return min(2.0 ** attempt, 8.0)
 
     def _error_result(
         self,

@@ -159,7 +159,22 @@ Repository rules:
 
 ## Dependencies
 
-Dependencies are part of the product surface.
+Dependencies are part of the product surface. InsightSwarm follows a
+**minimum-dependency** policy: the runtime depends on a small set of
+well-maintained libraries instead of hand-writing the same infrastructure.
+New runtime dependencies require a justification that outweighs the cost of
+owning the code.
+
+Core runtime dependencies (declared in `pyproject.toml`):
+
+- `pyyaml` — parse `config.yaml` and other YAML configuration files; replaces
+  the former line-based pseudo-YAML reader.
+- `python-dotenv` — load `.env` files into `os.environ`; replaces the
+  hand-written dotenv parser.
+- `tenacity` — declarative retry with exponential backoff for model and HTTP
+  calls; replaces the hand-written retry loops in `openai_compatible.py`.
+- `orjson` — fast JSON serialization for trace writes, store persistence, and
+  large response parsing; replaces `json` on performance-sensitive paths.
 
 - Core runtime dependencies belong in `pyproject.toml`.
 - Browser-only dependencies belong in a browser extra.

@@ -9,10 +9,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
 from urllib.parse import urlparse
-from urllib.request import urlopen
 
+from insightswarm.tools.http_utils import HttpRequestError, HttpResponseError, request_json
 from insightswarm.util import new_id
 
 try:

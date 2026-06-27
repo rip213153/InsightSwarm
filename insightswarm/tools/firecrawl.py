@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 import os
 import time
-import urllib.error
-import urllib.request
 from typing import Any
 
 from insightswarm.tools.core import ToolContext, ToolResult
+from insightswarm.tools.http_utils import HttpRequestError, HttpResponseError, request_json
 from insightswarm.tools.safety import validate_public_http_url
 
 
@@ -35,27 +33,25 @@ class FirecrawlScrapeTool:
             "timeout": int(float(tool_input.get("timeout") or 30000)),
         }
         started = time.perf_counter()
-        request = urllib.request.Request(
-            "https://api.firecrawl.dev/v1/scrape",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=float(tool_input.get("request_timeout") or 45.0)) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:500]
+            raw = request_json(
+                "https://api.firecrawl.dev/v1/scrape",
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                body=payload,
+                timeout=float(tool_input.get("request_timeout") or 45.0),
+            )
+        except HttpResponseError as exc:
             return ToolResult(
                 "error",
-                error=f"Firecrawl HTTP {exc.code}",
-                diagnostics={"http_status": exc.code, "body_preview": body},
+                error=f"Firecrawl HTTP {exc.status_code}",
+                diagnostics={"http_status": exc.status_code, "body_preview": exc.body[:500]},
                 provenance={"tool": self.name, "provider": "firecrawl"},
             )
-        except Exception as exc:
+        except HttpRequestError as exc:
             return ToolResult(
                 "error",
                 error=f"Firecrawl request failed: {exc}",

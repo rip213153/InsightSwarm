@@ -4,6 +4,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+from dotenv import load_dotenv
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -14,30 +17,17 @@ class Settings:
     model_config_path: Path | None = None
 
 
-def _read_dotenv(path: Path = Path(".env")) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
-
+# Hand-written dotenv/yaml parsers were replaced by python-dotenv and pyyaml.
+# See git history for the original implementations.
 
 def _read_config_yaml(path: Path = Path("config.yaml")) -> dict[str, str]:
     if not path.exists():
         return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
+    with path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle)
+    if not isinstance(loaded, dict):
+        return {}
+    return {str(key): str(value) for key, value in loaded.items() if value is not None}
 
 
 def _first(*values: str | None) -> str | None:
@@ -54,13 +44,12 @@ def load_settings(
     config_path: str | None = None,
     model_config_path: str | None = None,
 ) -> Settings:
-    dotenv = _read_dotenv()
+    load_dotenv()
     yaml_path = Path(config_path) if config_path else Path("config.yaml")
     yaml_config = _read_config_yaml(yaml_path)
     resolved_db = Path(
         _first(
             db_path,
-            dotenv.get("INSIGHTSWARM_DB_PATH"),
             os.getenv("INSIGHTSWARM_DB_PATH"),
             yaml_config.get("db_path"),
             ".insightswarm/insightswarm.db",
@@ -70,7 +59,6 @@ def load_settings(
     resolved_artifacts = Path(
         _first(
             artifact_dir,
-            dotenv.get("INSIGHTSWARM_ARTIFACT_DIR"),
             os.getenv("INSIGHTSWARM_ARTIFACT_DIR"),
             yaml_config.get("artifact_dir"),
             ".insightswarm/artifacts",
@@ -79,14 +67,12 @@ def load_settings(
     )
     provider = _first(
         model_provider,
-        dotenv.get("INSIGHTSWARM_MODEL_PROVIDER"),
         os.getenv("INSIGHTSWARM_MODEL_PROVIDER"),
         yaml_config.get("model_provider"),
         "fake",
     )
     resolved_model_config = _first(
         model_config_path,
-        dotenv.get("INSIGHTSWARM_MODEL_CONFIG"),
         os.getenv("INSIGHTSWARM_MODEL_CONFIG"),
         yaml_config.get("model_config_path"),
         None,
