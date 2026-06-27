@@ -187,7 +187,16 @@ class _ModelResult:
         self.json_data = json_data
 
 
-def test_agent_loop_requires_explicit_finish_tool_after_no_tool_turn() -> None:
+def test_agent_loop_terminates_on_first_no_tool_turn() -> None:
+    """model_no_tool is NOT recoverable: the first turn without a tool call
+    terminates the loop immediately.
+
+    Previously the runtime retried model_no_tool up to 3 times, which let the
+    model stall repeatedly (run_39d9707f533a amnesia loop). Now the first
+    model_no_tool is terminal with stop_reason=model_error. The model gets
+    exactly one chance per round to emit a tool call; if it cannot, the loop
+    stops and surfaces the failure for repair.
+    """
     state = AgentLoopState()
     trace, state = run_agent_loop(
         model_client=_NoToolThenFinishModel(),
@@ -199,12 +208,20 @@ def test_agent_loop_requires_explicit_finish_tool_after_no_tool_turn() -> None:
         safety_cap=5,
     )
 
-    assert state.terminal_status == "done"
+    # First no-tool turn terminates immediately; the second finish_research
+    # call in _NoToolThenFinishModel never runs.
+    assert state.terminal_status == "model_no_tool"
+    assert state.stop_reason == "model_error"
+    assert len(trace) == 1
     assert trace[0]["failure_kind"] == "model_no_tool"
-    assert trace[1]["tool_call"]["name"] == "finish_research"
 
 
-def test_agent_loop_does_not_treat_repeated_no_tool_as_done() -> None:
+def test_agent_loop_always_no_tool_terminates_on_first_round() -> None:
+    """An always-no-tool model terminates after exactly one round.
+
+    The previous behavior retried 3 times (3 model_no_tool trace entries).
+    With model_no_tool non-recoverable, there is exactly 1 trace entry.
+    """
     trace, state = run_agent_loop(
         model_client=_AlwaysNoToolModel(),
         system_prompt="Use tools.",
@@ -216,7 +233,8 @@ def test_agent_loop_does_not_treat_repeated_no_tool_as_done() -> None:
 
     assert state.terminal_status == "model_no_tool"
     assert state.terminal_status != "done"
-    assert len([item for item in trace if item["failure_kind"] == "model_no_tool"]) == 3
+    assert state.stop_reason == "model_error"
+    assert len([item for item in trace if item["failure_kind"] == "model_no_tool"]) == 1
 
 
 def test_agent_loop_attaches_audit_metadata() -> None:

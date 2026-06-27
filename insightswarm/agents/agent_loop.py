@@ -13,6 +13,7 @@ from insightswarm.agents.agent_loop_contract import (
     validate_tool_call,
 )
 from insightswarm.agents.tool_executor import ToolExecutor
+from insightswarm.models.agent_turn import parse_agent_turn
 
 
 AGENT_LOOP_CONTRACT = """\
@@ -385,14 +386,22 @@ def _call_model(
             "stop_reason": stop_reason,
         }
     data = getattr(result, "json_data", None)
-    if isinstance(data, dict):
-        return data
-    text = str(getattr(result, "text", "") or "")
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        return {"assistant_text": text[:1000], "tool_call": None, "stop_reason": "invalid_json"}
+    if not isinstance(data, dict):
+        text = str(getattr(result, "text", "") or "")
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            # JSON parse failure is a model_error, not a distinct failure kind.
+            # The model produced unparseable output; retrying may help (transient
+            # truncation) but there is no separate "invalid_json" recovery path.
+            return {"assistant_text": text[:1000], "tool_call": None, "stop_reason": "model_error"}
+    # AgentTurn schema validation: shape violations are model_error, not
+    # invalid_json. This is the second defense line after the API layer's
+    # JSON mode. Providers with json_schema strict mode make this a no-op.
+    turn, schema_error = parse_agent_turn(data)
+    if turn is None:
+        return {"assistant_text": (schema_error or "schema error")[:1000], "tool_call": None, "stop_reason": "model_error"}
+    return turn.model_dump(exclude_none=True)
 
 
 def _compose_system_prompt(role_prompt: str) -> str:
@@ -627,8 +636,10 @@ def _failure_kind(status: str, reason: str) -> str:
     lowered_reason = _safe_text(reason).lower()
     if lowered_status == "model_error" and ("timed out" in lowered_reason or "timeout" in lowered_reason):
         return "model_timeout"
-    if lowered_status in {"model_error", "invalid_json"}:
+    if lowered_status == "model_error":
         return lowered_status
+    # model_no_tool is preserved as a failure_kind label for trace clarity,
+    # but it is no longer recoverable (see _recoverable_model_failure).
     if lowered_status == "model_no_tool":
         return "model_no_tool"
     if lowered_status == "blocked" and "safety cap" in lowered_reason:
@@ -637,7 +648,11 @@ def _failure_kind(status: str, reason: str) -> str:
 
 
 def _recoverable_model_failure(status: str) -> bool:
-    return _safe_text(status).lower() in {"model_error", "invalid_json", "model_no_tool"}
+    # model_no_tool and invalid_json are NOT recoverable: the model chose not
+    # to call a tool (or produced unparseable output), and retrying lets it
+    # stall again. Only transient infra failures (model_error, rate limits)
+    # get retry budget. First model_no_tool/invalid_json terminates the loop.
+    return _safe_text(status).lower() in {"model_error", "model_rate_limited"}
 
 
 def _stop_reason_from_status(status: str) -> str:
@@ -645,7 +660,9 @@ def _stop_reason_from_status(status: str) -> str:
     lowered = _safe_text(status).lower()
     if lowered == "model_rate_limited":
         return "model_rate_limited"
-    if lowered in {"model_error", "invalid_json", "model_no_tool"}:
+    # model_no_tool and the removed invalid_json both collapse to model_error
+    # in the structured stop_reason vocabulary.
+    if lowered in {"model_error", "model_no_tool"}:
         return "model_error"
     return "blocked"
 
@@ -775,7 +792,7 @@ def _next_private_state(turn: dict[str, Any], previous_state: dict[str, Any] | N
     # model via the model_error tool_result (history layer), not private_state
     # (reasoning layer). Mirrors V3's separation: tool results live in history,
     # reasoning lives in prefix/memory — they don't bleed into each other.
-    if _safe_text(turn.get("stop_reason")) in {"model_error", "model_rate_limited", "model_no_tool", "invalid_json"} and previous_state:
+    if _safe_text(turn.get("stop_reason")) in {"model_error", "model_rate_limited", "model_no_tool"} and previous_state:
         return dict(previous_state)
     return {
         "current_understanding": _safe_text(turn.get("current_understanding")) or _safe_text(turn.get("assistant_text")),

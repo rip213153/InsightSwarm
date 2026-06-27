@@ -21,7 +21,7 @@ def normalize_agent_failure(*, status: str | None, reason: str | None) -> AgentF
     normalized_reason = _safe_text(reason)
     lowered_reason = normalized_reason.lower()
 
-    if normalized_status in {"model_error", "model_rate_limited", "invalid_json", "model_no_tool"}:
+    if normalized_status in {"model_error", "model_rate_limited", "model_no_tool"}:
         return AgentFailure(
             category="technical",
             reason=normalized_reason or normalized_status,

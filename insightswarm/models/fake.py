@@ -14,6 +14,8 @@ class FakeModelClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         metadata: dict | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> ModelResult:
         metadata = metadata or {}
         role = metadata.get("role", "unknown")

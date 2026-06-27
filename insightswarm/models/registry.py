@@ -23,6 +23,13 @@ class ProviderConfig:
     api_key_env: str | None = None
     models: dict[str, str] = field(default_factory=dict)
     timeout_seconds: float = 60.0
+    # Capability flags: declared by the operator in config.models.json.
+    # ``supports_tool_choice_required`` — provider accepts tool_choice="required"
+    # and will always emit at least one tool_call (no model_no_tool escape).
+    # ``supports_json_schema_strict`` — provider accepts response_format with
+    # json_schema strict mode, making AgentTurn validation a near-passthrough.
+    supports_tool_choice_required: bool = False
+    supports_json_schema_strict: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +98,8 @@ def _coerce_model_config(data: dict[str, Any], *, source: str) -> ModelConfig:
             api_key_env=str(raw["api_key_env"]) if raw.get("api_key_env") else None,
             models={str(k): str(v) for k, v in models.items()},
             timeout_seconds=float(raw.get("timeout_seconds") or 60.0),
+            supports_tool_choice_required=bool(raw.get("supports_tool_choice_required") or False),
+            supports_json_schema_strict=bool(raw.get("supports_json_schema_strict") or False),
         )
 
     agents: dict[str, AgentModelConfig] = {}

@@ -61,12 +61,16 @@ class OpenAICompatibleClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         metadata: dict | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> ModelResult:
         return self._post_chat(
             messages,
             response_format=response_format,
             max_tokens=max_tokens,
             temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
         )
 
     def analyze_image(
@@ -111,6 +115,8 @@ class OpenAICompatibleClient:
         response_format: dict | None,
         max_tokens: int | None,
         temperature: float | None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> ModelResult:
         api_key = os.getenv(self.api_key_env)
         if not api_key:
@@ -122,6 +128,10 @@ class OpenAICompatibleClient:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if tools:
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         started = time.perf_counter()
         request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         max_retries = 3
