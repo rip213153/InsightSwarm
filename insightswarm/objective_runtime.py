@@ -16,6 +16,7 @@ from insightswarm.agents.researcher import Researcher
 from insightswarm.agents.writer import WriterWorker
 from insightswarm.db.store import Store
 from insightswarm.delivery_gate import synchronize_delivery_gate
+from insightswarm.event_bus import EventBus
 from insightswarm.extraction_batches import synchronize_extraction_batches, synchronize_run_evidence_review
 from insightswarm.models.registry import ModelRegistry
 from insightswarm.models.router import build_model_client
@@ -33,14 +34,58 @@ StopReason = Literal[
 
 DeliveryKind = Literal["report", "report_partial", "report_blocked"]
 
-# Worker poll interval. Workers claim tasks by polling TaskStore; 0.5s keeps
-# task pickup latency well below a model call (~30s+) while cutting the per-run
-# SQLite query load by ~10x vs the previous 0.05s spin.
-_WORKER_POLL_INTERVAL = 0.5
+# Worker poll interval — now a FALLBACK only. Workers block on
+# EventBus.wait(role, timeout=_WORKER_POLL_INTERVAL) and wake near-real-time
+# when a producer (TaskStore.create / Mailbox.send) notifies their role. The
+# 5.0s timeout drains any lost-wakeup race and cross-process work that the
+# in-process condition variable cannot see. Vs the old 0.5s fixed poll this
+# cuts the per-run SQLite claim_next query load from ~10x to ~2x the number of
+# real task transitions, while dropping idle task pickup latency from 0.5s to
+# milliseconds in the common push case.
+_WORKER_POLL_INTERVAL = 5.0
 # Runtime governance loop interval. The runtime re-checks budgets, delivery
 # gate, and progress counts on this cadence; 1.0s is ample for runs measured in
-# minutes and avoids hammering list_swarm_* queries at 20Hz.
+# minutes and avoids hammering list_swarm_* queries at 20Hz. The runtime also
+# subscribes to the EventBus on the sentinel "runtime" role so a broadcast
+# (e.g. writer publishing a report) wakes it within one notify instead of
+# waiting the full second.
 _RUNTIME_POLL_INTERVAL = 1.0
+_RUNTIME_EVENT_ROLE = "runtime"
+
+# Role pool sizing. Lead/Writer stay singletons (coordination and delivery are
+# serial by design); the fan-out roles default to >1 so independent tasks run
+# concurrently. Override per-process via env vars, e.g. WORKER_POOL_RESEARCHER=4.
+_DEFAULT_POOL_SIZES: dict[str, int] = {
+    "lead": 1,
+    "writer": 1,
+    "researcher": 4,
+    "extractor": 4,
+    "browser_agent": 2,
+    "critic": 2,
+}
+_POOL_ENV_VARS: dict[str, str] = {
+    "lead": "WORKER_POOL_LEAD",
+    "writer": "WORKER_POOL_WRITER",
+    "researcher": "WORKER_POOL_RESEARCHER",
+    "extractor": "WORKER_POOL_EXTRACTOR",
+    "browser_agent": "WORKER_POOL_BROWSER",
+    "critic": "WORKER_POOL_CRITIC",
+}
+
+
+def _pool_size_for(role: str) -> int:
+    """Read the worker pool size for ``role`` from env, falling back to default."""
+    env_var = _POOL_ENV_VARS.get(role)
+    if env_var:
+        raw = os.environ.get(env_var)
+        if raw:
+            try:
+                value = int(raw)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                pass
+    return _DEFAULT_POOL_SIZES.get(role, 1)
 
 
 @dataclass(frozen=True)
@@ -91,6 +136,7 @@ class RuntimeState:
     model_client: Any | None = None
     browser_model_client: Any | None = None
     model_registry: ModelRegistry | None = None
+    event_bus: EventBus | None = None
 
 
 class BrowserCompositeModelClient:
@@ -122,20 +168,22 @@ def run_objective(
     run_id = run_id or new_id("run")
     run_dir = run_root / ".tmp" / f"run-{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    event_bus = EventBus()
     state = RuntimeState(
         run_id=run_id,
         run_root=run_root,
         question=question,
         budget=budget,
         step_trace_path=run_dir / "steps.jsonl",
-        task_store=TaskStore(store),
-        mailbox=Mailbox(store),
+        task_store=TaskStore(store, event_bus=event_bus),
+        mailbox=Mailbox(store, event_bus=event_bus),
         artifact_store=ArtifactStore(store),
         board_store=BoardStore(store),
         last_progress_at=time.monotonic(),
         model_client=model_client,
         browser_model_client=browser_model_client or _browser_model(model_registry),
         model_registry=model_registry,
+        event_bus=event_bus,
     )
     state.task_store.recover_expired_leases(run_id)
 
@@ -145,6 +193,10 @@ def run_objective(
         _wait_until_stop(store, state, stop_event)
     finally:
         stop_event.set()
+        # Wake every worker blocked in event_bus.wait so they observe
+        # stop_event within one notify instead of waiting up to the 5s
+        # fallback. Workers not yet waiting simply loop, see stop_event, exit.
+        event_bus.notify_all_roles()
         for thread in worker_threads:
             thread.join(timeout=5.0)
 
@@ -296,78 +348,105 @@ def resume_objective(
 
 def _start_worker_threads(store: Store, state: RuntimeState, stop_event: threading.Event) -> list[threading.Thread]:
     assert state.task_store is not None and state.mailbox is not None and state.artifact_store is not None and state.board_store is not None
+    assert state.event_bus is not None
     artifact_store = ArtifactStore(store)
     board_store = BoardStore(store)
-    threads = [
-        threading.Thread(
-            target=lambda: LeadWorker(
-                state.task_store,
-                state.mailbox,
-                board_store,
-                model_client=_agent_model(state, "lead"),
-            ).run_forever(
-                state.run_id,
-                stop_event,
-                poll_interval=_WORKER_POLL_INTERVAL,
-                run_root=state.run_root,
-            ),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=lambda: BrowserWorker(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
-                state.run_id,
-                stop_event,
-                poll_interval=_WORKER_POLL_INTERVAL,
-                model_client=state.browser_model_client or _browser_model(state.model_registry),
-                trace_path=state.step_trace_path,
-                run_root=state.run_root,
-            ),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=lambda: Extractor(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
-                state.run_id,
-                stop_event,
-                poll_interval=_WORKER_POLL_INTERVAL,
-                model_client=_agent_model(state, "extractor"),
-                trace_path=state.step_trace_path,
-                run_root=state.run_root,
-            ),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=lambda: Researcher(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
-                state.run_id,
-                stop_event,
-                poll_interval=_WORKER_POLL_INTERVAL,
-                model_client=_agent_model(state, "researcher"),
-                trace_path=state.step_trace_path,
-                run_root=state.run_root,
-            ),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=lambda: Critic(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
-                state.run_id,
-                stop_event,
-                poll_interval=_WORKER_POLL_INTERVAL,
-                model_client=_agent_model(state, "critic"),
-                trace_path=state.step_trace_path,
-                run_root=state.run_root,
-            ),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=lambda: WriterWorker(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
-                state.run_id,
-                stop_event,
-                poll_interval=_WORKER_POLL_INTERVAL,
-                model_client=_agent_model(state, "writer"),
-                run_root=state.run_root,
-            ),
-            daemon=True,
-        ),
+    event_bus = state.event_bus
+    poll_interval = _WORKER_POLL_INTERVAL
+
+    # Each factory builds a fresh worker instance and runs its loop. Building
+    # per-thread keeps pool workers from sharing mutable instance state even if
+    # a future worker gains some. claim_next remains the serialization point
+    # for task ownership; LeaseGuard/ExecutionCell keep each claim isolated, so
+    # multiple workers of the same role are safe without touching that layer.
+    def _lead_target() -> None:
+        LeadWorker(
+            state.task_store,
+            state.mailbox,
+            board_store,
+            model_client=_agent_model(state, "lead"),
+        ).run_forever(
+            state.run_id,
+            stop_event,
+            poll_interval=poll_interval,
+            run_root=state.run_root,
+            event_bus=event_bus,
+        )
+
+    def _browser_target() -> None:
+        BrowserWorker(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
+            state.run_id,
+            stop_event,
+            poll_interval=poll_interval,
+            model_client=state.browser_model_client or _browser_model(state.model_registry),
+            trace_path=state.step_trace_path,
+            run_root=state.run_root,
+            event_bus=event_bus,
+        )
+
+    def _extractor_target() -> None:
+        Extractor(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
+            state.run_id,
+            stop_event,
+            poll_interval=poll_interval,
+            model_client=_agent_model(state, "extractor"),
+            trace_path=state.step_trace_path,
+            run_root=state.run_root,
+            event_bus=event_bus,
+        )
+
+    def _researcher_target() -> None:
+        Researcher(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
+            state.run_id,
+            stop_event,
+            poll_interval=poll_interval,
+            model_client=_agent_model(state, "researcher"),
+            trace_path=state.step_trace_path,
+            run_root=state.run_root,
+            event_bus=event_bus,
+        )
+
+    def _critic_target() -> None:
+        Critic(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
+            state.run_id,
+            stop_event,
+            poll_interval=poll_interval,
+            model_client=_agent_model(state, "critic"),
+            trace_path=state.step_trace_path,
+            run_root=state.run_root,
+            event_bus=event_bus,
+        )
+
+    def _writer_target() -> None:
+        WriterWorker(state.task_store, state.mailbox, artifact_store, board_store).run_forever(
+            state.run_id,
+            stop_event,
+            poll_interval=poll_interval,
+            model_client=_agent_model(state, "writer"),
+            run_root=state.run_root,
+            event_bus=event_bus,
+        )
+
+    role_targets: list[tuple[str, Any]] = [
+        ("lead", _lead_target),
+        ("browser_agent", _browser_target),
+        ("extractor", _extractor_target),
+        ("researcher", _researcher_target),
+        ("critic", _critic_target),
+        ("writer", _writer_target),
     ]
+
+    threads: list[threading.Thread] = []
+    for role, target in role_targets:
+        count = _pool_size_for(role)
+        for index in range(count):
+            threads.append(
+                threading.Thread(
+                    target=target,
+                    name=f"worker-{role}-{index}",
+                    daemon=True,
+                )
+            )
     for thread in threads:
         thread.start()
     return threads
@@ -394,6 +473,21 @@ def _browser_model(model_registry: ModelRegistry | None) -> Any | None:
         text_client=text_client,
         vision_client=vision_client,
     )
+
+
+def _runtime_wait(state: RuntimeState, *, timeout: float) -> None:
+    """Block the governance loop until a broadcast notify or ``timeout``.
+
+    Subscribes on the sentinel ``runtime`` role. ``Mailbox.send`` with
+    ``broadcast=True`` calls ``notify_all_roles``, which wakes this wait, so the
+    runtime re-checks the report/delivery-gate state within one notify instead
+    of waiting the full ``timeout``. Falls back to ``time.sleep`` only if no
+    event_bus is attached (defensive — run_objective always attaches one).
+    """
+    if state.event_bus is not None:
+        state.event_bus.wait(_RUNTIME_EVENT_ROLE, timeout=timeout)
+    else:
+        time.sleep(timeout)
 
 
 def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Event) -> None:
@@ -444,7 +538,7 @@ def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Ev
                         {"active_task_count": len(_active_tasks(store, state.run_id))},
                     )
                 if time.monotonic() - drain_started_at < state.budget.max_drain_seconds:
-                    time.sleep(_WORKER_POLL_INTERVAL)
+                    _runtime_wait(state, timeout=_WORKER_POLL_INTERVAL)
                     continue
             state.stop_reason = "budget_exhausted"
             _write_runtime_trace(state, "stop", {"stop_reason": state.stop_reason, "delivery_gate_reasons": state.delivery_gate_reasons})
@@ -460,7 +554,12 @@ def _wait_until_stop(store: Store, state: RuntimeState, stop_event: threading.Ev
             stop_event.set()
             continue
 
-        time.sleep(0.05)
+        # Pace the governance loop on _RUNTIME_POLL_INTERVAL (1.0s, matching the
+        # comment above) but wake early when a broadcast message — e.g. a writer
+        # publishing a report or a quick_answer_ready — notifies the sentinel
+        # "runtime" role via notify_all_roles. This replaces the residual
+        # 0.05s spin that hammered list_swarm_* at 20Hz.
+        _runtime_wait(state, timeout=_RUNTIME_POLL_INTERVAL)
 
 
 def _progress_counts(store: Store, run_id: str) -> tuple[int, int, int, int]:

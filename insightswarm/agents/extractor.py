@@ -11,6 +11,7 @@ from insightswarm.agents.extractor_tools import CRITIC_ROLE, EXTRACTOR_ROLE, EXT
 from insightswarm.agents.failure_policy import normalize_agent_failure
 from insightswarm.agents.tool_executor import ToolExecutor
 from insightswarm.agents.trace import build_tool_trace_callback
+from insightswarm.event_bus import EventBus
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
 
@@ -64,6 +65,7 @@ class Extractor:
         max_iterations: int | None = None,
         trace_path: Path | None = None,
         run_root: Path | None = None,
+        event_bus: EventBus | None = None,
     ) -> list[ExtractorResult]:
         results: list[ExtractorResult] = []
         while not stop_event.is_set():
@@ -75,7 +77,14 @@ class Extractor:
                 ),
             )
             if result is None:
-                stop_event.wait(poll_interval)
+                # Push-based wake: block on the role's condition until a notify
+                # (task created / message sent) or the fallback timeout. The
+                # runtime calls event_bus.notify_all_roles on teardown so a
+                # blocked wait wakes within one notify of stop_event.
+                if event_bus is not None:
+                    event_bus.wait(EXTRACTOR_ROLE, timeout=poll_interval)
+                else:
+                    stop_event.wait(poll_interval)
                 continue
             results.append(result)
             if max_iterations is not None and len(results) >= max_iterations:

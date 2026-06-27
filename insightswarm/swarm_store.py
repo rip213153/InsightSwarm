@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from insightswarm.db.store import Store
+from insightswarm.event_bus import EventBus
 from insightswarm.message_protocol import validate_message
 from insightswarm.schemas.swarm import Artifact, BoardItem, Evidence, Message, Task
 from insightswarm.util import dumps, new_id
@@ -15,10 +16,17 @@ ACTIVE_TASK_STATUSES = {"pending", "leased"}
 
 
 class TaskStore:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, *, event_bus: EventBus | None = None):
         self.store = store
+        self._event_bus = event_bus
 
-    def create(self, run_id: str, **task_kwargs: Any) -> Task:
+    def create(
+        self,
+        run_id: str,
+        *,
+        event_bus: EventBus | None = None,
+        **task_kwargs: Any,
+    ) -> Task:
         with self.store.transaction() as conn:
             existing = self._find_existing_task_in_conn(conn, run_id, task_kwargs)
             if existing is not None:
@@ -60,6 +68,13 @@ class TaskStore:
                     now,
                 ),
             )
+        # Transaction has committed above (the `with` block exited). Notify only
+        # after the commit so a woken worker can actually see the new row.
+        bus = event_bus or self._event_bus
+        if bus is not None:
+            target_role = str(task_kwargs.get("owner_role") or "")
+            if target_role:
+                bus.notify_role(target_role)
         return self.store.get_swarm_task(task_id)
 
     def list_pending(self, run_id: str, owner_role: str | None = None) -> list[Task]:
@@ -270,8 +285,9 @@ class TaskStore:
 
 
 class Mailbox:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, *, event_bus: EventBus | None = None):
         self.store = store
+        self._event_bus = event_bus
 
     def send(
         self,
@@ -283,13 +299,14 @@ class Mailbox:
         message_type: str,
         payload: dict[str, Any] | None = None,
         related_task_id: str | None = None,
+        event_bus: EventBus | None = None,
     ) -> Message:
         validate_message(
             message_type=message_type,
             payload=payload,
             related_task_id=related_task_id,
         )
-        return self.store.create_swarm_message(
+        message = self.store.create_swarm_message(
             run_id,
             from_role=from_role,
             to_role=to_role,
@@ -298,6 +315,17 @@ class Mailbox:
             payload=payload,
             related_task_id=related_task_id,
         )
+        # create_swarm_message commits its own transaction before returning, so
+        # the row is durable before we wake any recipient worker.
+        bus = event_bus or self._event_bus
+        if bus is not None:
+            if broadcast:
+                # Broadcasts reach every role's inbox; wake them all so each
+                # role's worker observes the message on its next claim cycle.
+                bus.notify_all_roles()
+            elif to_role:
+                bus.notify_role(to_role)
+        return message
 
     def inbox(self, run_id: str, *, role: str) -> list[Message]:
         return self.store.list_swarm_messages(run_id, to_role=role, include_broadcast=True)

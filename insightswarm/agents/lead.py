@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event
 
 from insightswarm.agents.execution_cell import run_in_cell, run_supervised_once
+from insightswarm.event_bus import EventBus
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import BoardStore, Mailbox, TaskStore
 
@@ -99,6 +100,7 @@ class LeadWorker:
         poll_interval: float = 0.2,
         max_iterations: int | None = None,
         run_root: Path | None = None,
+        event_bus: EventBus | None = None,
     ) -> LeadLoopResult:
         iterations = 0
         claimed_task_ids: list[str] = []
@@ -112,7 +114,14 @@ class LeadWorker:
                 call_once=lambda: self.run_once(run_id, run_root=run_root),
             )
             if result is None:
-                stop_event.wait(poll_interval)
+                # Push-based wake: block on the role's condition until a notify
+                # (task created / message sent) or the fallback timeout. The
+                # runtime calls event_bus.notify_all_roles on teardown so a
+                # blocked wait wakes within one notify of stop_event.
+                if event_bus is not None:
+                    event_bus.wait("lead", timeout=poll_interval)
+                else:
+                    stop_event.wait(poll_interval)
                 continue
             iterations += 1
             claimed_task_ids.append(result.claimed_task_id)

@@ -9,6 +9,7 @@ from typing import Any
 from insightswarm.agents.agent_loop import AgentLoopState, run_agent_loop
 from insightswarm.agents.execution_cell import run_in_cell, run_supervised_once
 from insightswarm.agents.tool_executor import ToolExecutor
+from insightswarm.event_bus import EventBus
 from insightswarm.schemas.swarm import Task
 from insightswarm.swarm_store import ArtifactStore, BoardStore, Mailbox, TaskStore
 
@@ -416,6 +417,7 @@ class WriterWorker:
         model_client: object | None = None,
         max_iterations: int | None = None,
         run_root: Path | None = None,
+        event_bus: EventBus | None = None,
     ) -> list[WriterWorkResult]:
         results: list[WriterWorkResult] = []
 
@@ -426,7 +428,14 @@ class WriterWorker:
                 call_once=lambda: self.run_once(run_id, model_client=model_client, run_root=run_root),
             )
             if result is None:
-                stop_event.wait(poll_interval)
+                # Push-based wake: block on the role's condition until a notify
+                # (task created / message sent) or the fallback timeout. The
+                # runtime calls event_bus.notify_all_roles on teardown so a
+                # blocked wait wakes within one notify of stop_event.
+                if event_bus is not None:
+                    event_bus.wait("writer", timeout=poll_interval)
+                else:
+                    stop_event.wait(poll_interval)
                 continue
             results.append(result)
             if max_iterations is not None and len(results) >= max_iterations:
