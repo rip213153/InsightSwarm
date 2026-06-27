@@ -9,20 +9,25 @@ from insightswarm.eval.cases import EvalCase
 from insightswarm.eval.quote_verify import CitationCheckSummary
 
 
-# Scoring dimensions. Each is scored 0.0-1.0 by the judge, then combined by WEIGHTS.
+# Scoring dimensions and weights. Each is scored 0.0-1.0 by the judge, then
+# combined by WEIGHTS. These MUST stay in lock-step with ``evals/rubric.md``;
+# any change here is a rubric change and must be reflected there (and vice
+# versa). Weights sum to 1.00.
 DIMENSIONS = (
-    "coverage",          # does the report address the must-cover points
-    "accuracy",          # are the factual claims correct / non-contradictory
-    "citation_quality",  # do citations actually support the claims they back
-    "unsupported_claims",# inverse: are hard claims left unsupported (1.0 = none unsupported)
-    "conflict_handling", # are caveats / conflicts / uncertainty handled honestly
+    "coverage",                 # does the report address the must-cover points
+    "accuracy",                 # are the factual claims correct / non-contradictory
+    "citation_support",         # do citations actually support the claims they back
+    "hallucination_avoidance",  # are hard assertions backed by citations (1.0 = no fabrication)
+    "conflict_handling",        # are caveats / conflicts / uncertainty handled honestly
 )
 
+# Weights sourced from ``evals/rubric.md`` (coverage 0.30, accuracy 0.30,
+# citation_support 0.20, hallucination_avoidance 0.10, conflict_handling 0.10).
 WEIGHTS = {
     "coverage": 0.30,
-    "accuracy": 0.25,
-    "citation_quality": 0.20,
-    "unsupported_claims": 0.15,
+    "accuracy": 0.30,
+    "citation_support": 0.20,
+    "hallucination_avoidance": 0.10,
     "conflict_handling": 0.10,
 }
 
@@ -37,6 +42,13 @@ class JudgeResult:
     status: str = "ok"
     error: str | None = None
     raw_text: str = ""
+    # ``judge_method`` distinguishes how the score was produced so downstream
+    # stats can exclude non-LLM scores from the main mean. Values:
+    #   "llm"        - the judge model returned a parseable score
+    #   "fallback"   - the deterministic heuristic was used because the judge
+    #                  model was unavailable, fake, or returned unparseable output
+    #   "no_report"  - the swarm delivered no report body; score is zero by rule
+    judge_method: str = "llm"
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -47,6 +59,7 @@ class JudgeResult:
             "judge_model": self.judge_model,
             "status": self.status,
             "error": self.error,
+            "judge_method": self.judge_method,
         }
 
 
@@ -112,12 +125,13 @@ def _system_prompt() -> str:
         "A claim is 'unmatched' if its quote was not found in the source text by the "
         "deterministic checker; treat unmatched citations as unsupported. "
         "Return STRICT JSON only, no prose, in this exact shape:\n"
-        '{"scores": {"coverage": 0.0, "accuracy": 0.0, "citation_quality": 0.0, '
-        '"unsupported_claims": 0.0, "conflict_handling": 0.0}, '
-        '"rationale": {"coverage": "...", "accuracy": "...", "citation_quality": "...", '
-        '"unsupported_claims": "...", "conflict_handling": "..."}}\n'
-        "Each score is a float in [0.0, 1.0]. For unsupported_claims, 1.0 means every "
-        "hard claim is supported and 0.0 means many hard claims are unsupported.\n\n"
+        '{"scores": {"coverage": 0.0, "accuracy": 0.0, "citation_support": 0.0, '
+        '"hallucination_avoidance": 0.0, "conflict_handling": 0.0}, '
+        '"rationale": {"coverage": "...", "accuracy": "...", "citation_support": "...", '
+        '"hallucination_avoidance": "...", "conflict_handling": "..."}}\n'
+        "Each score is a float in [0.0, 1.0]. For hallucination_avoidance, 1.0 means "
+        "every hard claim is supported by a citation and 0.0 means many hard claims "
+        "are unsupported or fabricated.\n\n"
         + _rubric_text()
     )
 
@@ -157,13 +171,13 @@ def _deterministic_fallback(
     covered = sum(1 for point in case.must_cover if _point_hit(point, body_lower))
     coverage = covered / len(case.must_cover) if case.must_cover else 0.0
     violated = any(_point_hit(point, body_lower) for point in case.must_not_claim)
-    citation_quality = citation_summary.grounded_ratio if citation_summary.total else 0.5
-    unsupported = citation_summary.grounded_ratio if citation_summary.total else 0.5
+    citation_support = citation_summary.grounded_ratio if citation_summary.total else 0.5
+    hallucination_avoidance = citation_summary.grounded_ratio if citation_summary.total else 0.5
     return {
         "coverage": round(coverage, 4),
         "accuracy": 0.0 if violated else round(0.5 + 0.5 * coverage, 4),
-        "citation_quality": round(citation_quality, 4),
-        "unsupported_claims": round(unsupported, 4),
+        "citation_support": round(citation_support, 4),
+        "hallucination_avoidance": round(hallucination_avoidance, 4),
         "conflict_handling": 1.0 if "caveat" in body_lower or "watch" in body_lower else 0.5,
     }
 
@@ -198,12 +212,14 @@ def judge_report(
             judge_provider=provider,
             judge_model=model,
             status="no_report",
+            judge_method="no_report",
         )
 
     parsed: dict[str, Any] | None = None
     raw_text = ""
     status = "ok"
     error: str | None = None
+    judge_method = "fallback"  # default assumption: no usable LLM score yet
 
     is_fake = provider == "fake"
     if model_client is not None and not is_fake:
@@ -232,11 +248,13 @@ def judge_report(
         scores = {dimension: _clamp(raw_scores.get(dimension)) for dimension in DIMENSIONS}
         rationale_raw = parsed.get("rationale") if isinstance(parsed.get("rationale"), dict) else {}
         rationale = {dimension: str(rationale_raw.get(dimension, "")) for dimension in DIMENSIONS}
+        judge_method = "llm"
     else:
         scores = _deterministic_fallback(case=case, report_body=report_body, citation_summary=citation_summary)
         rationale = {dimension: "deterministic fallback (judge model unavailable or unparseable)" for dimension in DIMENSIONS}
         if status == "ok":
             status = "fallback"
+        # judge_method stays "fallback"
 
     return JudgeResult(
         score_overall=combine(scores),
@@ -247,4 +265,5 @@ def judge_report(
         status=status,
         error=error,
         raw_text=raw_text,
+        judge_method=judge_method,
     )

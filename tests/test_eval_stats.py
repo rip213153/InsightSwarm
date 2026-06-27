@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from insightswarm.eval.stats import compare_case, summarize
+from insightswarm.eval.stats import compare_case, summarize, summarize_split
 
 
 def test_summarize_empty():
@@ -48,3 +48,34 @@ def test_compare_new_and_dropped():
     assert compare_case("c1", None, b).verdict == "new"
     a = summarize([80.0])
     assert compare_case("c1", a, None).verdict == "dropped"
+
+
+def test_summarize_split_keeps_llm_and_fallback_separate():
+    """Fallback scores must NOT bleed into the LLM-judged mean.
+
+    This is the regression test for the "fallback pollutes the mean" bug: a
+    fallback score of 0.0 must not drag the LLM mean down, and the fallback
+    group must be reported on its own.
+    """
+    split = summarize_split(
+        scores_llm=[0.8, 0.9, 0.7],
+        scores_fallback=[0.0, 0.0],
+        n_no_report=1,
+    )
+    assert split.llm.n == 3
+    assert abs(split.llm.mean - 0.8) < 1e-9
+    assert split.fallback.n == 2
+    assert split.fallback.mean == 0.0
+    assert split.n_no_report == 1
+    assert split.n_total == 6
+
+
+def test_summarize_split_handles_no_llm_epochs():
+    """If every epoch fell back, the LLM group is empty and the fallback group
+    carries the signal instead of poisoning an empty main mean."""
+    split = summarize_split(scores_llm=[], scores_fallback=[0.3, 0.4])
+    assert split.llm.n == 0
+    assert split.llm.mean == 0.0
+    assert split.fallback.n == 2
+    assert abs(split.fallback.mean - 0.35) < 1e-9
+    assert split.n_total == 2

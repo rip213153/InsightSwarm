@@ -39,6 +39,44 @@ def summarize(scores: list[float]) -> ScoreSummary:
 
 
 @dataclass(frozen=True)
+class SplitSummary:
+    """LLM-judged vs fallback score breakdown for one case.
+
+    The ``llm`` group drives the headline mean; ``fallback`` is reported
+    separately so a judge outage cannot silently move the main score. The
+    ``no_report`` count is tracked but not summarized (those epochs are
+    failures of the swarm, not the judge, and their score is the rule-based
+    zero, not a measurement).
+    """
+    llm: ScoreSummary
+    fallback: ScoreSummary
+    n_no_report: int
+
+    @property
+    def n_total(self) -> int:
+        return self.llm.n + self.fallback.n + self.n_no_report
+
+
+def summarize_split(
+    scores_llm: list[float],
+    scores_fallback: list[float],
+    *,
+    n_no_report: int = 0,
+) -> SplitSummary:
+    """Summarize an epoch split by judge_method.
+
+    Pass the per-epoch overall scores partitioned by how they were produced.
+    The LLM subset feeds the main mean; the fallback subset is reported
+    alongside but never mixed in.
+    """
+    return SplitSummary(
+        llm=summarize(scores_llm),
+        fallback=summarize(scores_fallback),
+        n_no_report=int(n_no_report),
+    )
+
+
+@dataclass(frozen=True)
 class CaseComparison:
     case_id: str
     mean_a: float

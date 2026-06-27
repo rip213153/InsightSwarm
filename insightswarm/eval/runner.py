@@ -25,7 +25,7 @@ from insightswarm.db.store import Store
 from insightswarm.eval.cases import EvalCase, load_cases
 from insightswarm.eval.judge import JudgeResult, judge_report
 from insightswarm.eval.quote_verify import verify_citations
-from insightswarm.eval.stats import summarize
+from insightswarm.eval.stats import summarize_split
 from insightswarm.eval.store import EvalStore
 from insightswarm.eval.telemetry import (
     collect_report_citations,
@@ -58,6 +58,7 @@ class EpochOutcome:
     error: str | None
     judge_rationale: str
     citation_results: list[dict[str, Any]]
+    judge_method: str = "llm"
 
 
 def build_default_swarm_runner(
@@ -216,6 +217,7 @@ def _record_epoch(eval_store: EvalStore, eval_run_id: str, outcome: EpochOutcome
         status=outcome.status,
         error=outcome.error,
         judge_rationale=outcome.judge_rationale,
+        judge_method=outcome.judge_method,
     )
     if outcome.citation_results:
         eval_store.record_citation_checks(epoch_id, outcome.citation_results)
@@ -227,19 +229,39 @@ def _recompute_case_agg(eval_store: EvalStore, eval_run_id: str, case_id: str) -
         row for row in eval_store.list_epochs(eval_run_id)
         if str(row["case_id"]) == case_id
     ]
-    scores = [float(row["score_overall"] or 0.0) for row in rows]
-    grounded = [float(row["grounded_ratio"] or 0.0) for row in rows]
-    agg = summarize(scores)
+    # Partition by judge_method so fallback / no_report scores never pollute
+    # the headline mean. The LLM subset is the measurement; the others are
+    # reported alongside for transparency.
+    llm_scores: list[float] = []
+    fallback_scores: list[float] = []
+    n_no_report = 0
+    grounded: list[float] = []
+    for row in rows:
+        method = str(row.get("judge_method") or "llm")
+        score = float(row["score_overall"] or 0.0)
+        if method == "llm":
+            llm_scores.append(score)
+        elif method == "no_report":
+            n_no_report += 1
+        else:  # "fallback" or any future non-LLM method
+            fallback_scores.append(score)
+        grounded.append(float(row["grounded_ratio"] or 0.0))
+
+    split = summarize_split(llm_scores, fallback_scores, n_no_report=n_no_report)
     mean_grounded = sum(grounded) / len(grounded) if grounded else 0.0
     eval_store.upsert_case_agg(
         eval_run_id=eval_run_id,
         case_id=case_id,
-        n_epochs=agg.n,
-        mean=agg.mean,
-        std=agg.std,
-        stderr=agg.stderr,
-        min_score=agg.min_score,
-        max_score=agg.max_score,
+        n_epochs=len(rows),
+        n_llm=split.llm.n,
+        n_fallback=split.fallback.n,
+        n_no_report=split.n_no_report,
+        mean=split.llm.mean,
+        std=split.llm.std,
+        stderr=split.llm.stderr,
+        min_score=split.llm.min_score,
+        max_score=split.llm.max_score,
+        fallback_mean=split.fallback.mean if split.fallback.n else None,
         mean_grounded_ratio=round(mean_grounded, 4),
     )
 
@@ -270,6 +292,7 @@ def _run_one_epoch(
             error=f"{type(exc).__name__}: {exc}"[:500],
             judge_rationale="swarm run raised before delivery",
             citation_results=[],
+            judge_method="no_report",
         )
 
     payload = delivery.to_dict() if hasattr(delivery, "to_dict") else dict(delivery)
@@ -313,4 +336,5 @@ def _run_one_epoch(
         error=judge_result.error,
         judge_rationale=rationale_text,
         citation_results=list(citation_summary.results),
+        judge_method=judge_result.judge_method,
     )

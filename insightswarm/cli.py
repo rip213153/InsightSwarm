@@ -367,17 +367,60 @@ def _handle_eval(args: argparse.Namespace, settings: object, store: Store) -> in
 
 
 def _build_eval_judge_client(args: argparse.Namespace, settings: object) -> object:
+    """Build the judge model client, enforcing a provider distinct from the SUT.
+
+    The judge MUST come from a different provider than the system under test to
+    avoid self-preference bias (a model grading its own output). If the operator
+    has only one provider configured and has not explicitly nominated a different
+    judge provider via ``--judge-provider``, this is a hard error rather than a
+    silent fallback to the SUT provider.
+    """
     from insightswarm.models.registry import ModelRegistry
 
+    target_provider = settings.model_provider
     model_config_path = str(settings.model_config_path) if settings.model_config_path else None
-    if getattr(args, "judge_provider", None):
-        return build_model_client(
-            args.judge_provider,
-            model_config_path=model_config_path,
-        )
+    judge_provider_arg = getattr(args, "judge_provider", None)
+
+    if judge_provider_arg:
+        if judge_provider_arg == target_provider:
+            raise SystemExit(
+                f"judge provider must differ from the system under test, but "
+                f"--judge-provider={judge_provider_arg} equals the target "
+                f"provider '{target_provider}'. Specify a different provider "
+                f"or configure a 'judge' agent in config.models.json."
+            )
+        return build_model_client(judge_provider_arg, model_config_path=model_config_path)
+
+    # No explicit --judge-provider: try the 'judge' agent from the model config.
+    # We only accept an explicitly declared 'judge' agent; letting the registry
+    # fall back to the 'default' agent would silently reuse the SUT provider.
     if model_config_path:
-        return ModelRegistry.from_file(model_config_path).for_agent("judge")
-    return build_model_client(settings.model_provider)
+        registry = ModelRegistry.from_file(model_config_path)
+        if "judge" in registry.config.agents:
+            client = registry.for_agent("judge")
+            judge_provider = getattr(client, "provider", "unknown")
+            if judge_provider == target_provider:
+                raise SystemExit(
+                    f"judge provider must differ from the system under test, "
+                    f"but the 'judge' agent in {model_config_path} uses "
+                    f"provider '{judge_provider}' which equals the target "
+                    f"provider. Reconfigure the 'judge' agent or pass "
+                    f"--judge-provider explicitly."
+                )
+            return client
+        raise SystemExit(
+            f"judge provider must differ from the system under test, but no "
+            f"--judge-provider was given and {model_config_path} does not "
+            f"declare a 'judge' agent. Add a 'judge' agent with a different "
+            f"provider or pass --judge-provider explicitly."
+        )
+
+    raise SystemExit(
+        f"judge provider must differ from the system under test, but only one "
+        f"provider '{target_provider}' is configured and no --judge-provider "
+        f"was given. Specify a different provider via --judge-provider or "
+        f"configure a 'judge' agent in config.models.json."
+    )
 
 
 def _eval_summary_payload(eval_store: object, eval_run_id: str) -> dict:
@@ -400,9 +443,21 @@ def _print_eval_summary(payload: dict) -> None:
         f"repeat={run.get('repeat_n')} suite_mean={payload.get('suite_mean'):.4f}"
     )
     for row in payload.get("cases") or []:
+        n_total = int(row.get("n_epochs") or 0)
+        n_llm = int(row.get("n_llm") or 0)
+        n_fallback = int(row.get("n_fallback") or 0)
+        n_no_report = int(row.get("n_no_report") or 0)
+        fallback_mean = row.get("fallback_mean")
+        fallback_str = (
+            f" fallback_mean={float(fallback_mean):.4f}" if fallback_mean is not None else ""
+        )
         print(
             f"{row['case_id']}: mean={float(row['mean'] or 0.0):.4f} "
             f"stderr={float(row['stderr'] or 0.0):.4f} "
+            f"n_llm={n_llm}/{n_total}"
+            f"{f' n_fallback={n_fallback}' if n_fallback else ''}"
+            f"{f' n_no_report={n_no_report}' if n_no_report else ''}"
+            f"{fallback_str} "
             f"grounded={float(row['mean_grounded_ratio'] or 0.0):.4f}"
         )
 

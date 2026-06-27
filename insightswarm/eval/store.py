@@ -83,6 +83,7 @@ class EvalStore:
         status: str,
         error: str | None,
         judge_rationale: str | None,
+        judge_method: str = "llm",
     ) -> str:
         epoch_id = new_id("epoch")
         self.conn.execute(
@@ -91,13 +92,13 @@ class EvalStore:
                 epoch_id, eval_run_id, case_id, epoch_idx, swarm_run_id,
                 result_type, score_overall, score_dims_json, citation_summary_json,
                 grounded_ratio, latency_ms, token_total, status, error,
-                judge_rationale, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                judge_rationale, judge_method, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (epoch_id, eval_run_id, case_id, epoch_idx, swarm_run_id,
              result_type, score_overall, json.dumps(score_dims, ensure_ascii=False),
              json.dumps(citation_summary, ensure_ascii=False), grounded_ratio,
-             latency_ms, token_total, status, error, judge_rationale, _now()),
+             latency_ms, token_total, status, error, judge_rationale, judge_method, _now()),
         )
         return epoch_id
 
@@ -133,22 +134,30 @@ class EvalStore:
         min_score: float | None,
         max_score: float | None,
         mean_grounded_ratio: float | None,
+        n_llm: int = 0,
+        n_fallback: int = 0,
+        n_no_report: int = 0,
+        fallback_mean: float | None = None,
     ) -> None:
         self.conn.execute(
             """
             INSERT INTO eval_case_agg (
-                eval_run_id, case_id, n_epochs, mean, std, stderr,
-                min_score, max_score, mean_grounded_ratio, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                eval_run_id, case_id, n_epochs, n_llm, n_fallback, n_no_report,
+                mean, std, stderr, min_score, max_score, fallback_mean,
+                mean_grounded_ratio, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(eval_run_id, case_id) DO UPDATE SET
-                n_epochs=excluded.n_epochs, mean=excluded.mean, std=excluded.std,
+                n_epochs=excluded.n_epochs, n_llm=excluded.n_llm,
+                n_fallback=excluded.n_fallback, n_no_report=excluded.n_no_report,
+                mean=excluded.mean, std=excluded.std,
                 stderr=excluded.stderr, min_score=excluded.min_score,
-                max_score=excluded.max_score,
+                max_score=excluded.max_score, fallback_mean=excluded.fallback_mean,
                 mean_grounded_ratio=excluded.mean_grounded_ratio,
                 updated_at=excluded.updated_at
             """,
-            (eval_run_id, case_id, n_epochs, mean, std, stderr,
-             min_score, max_score, mean_grounded_ratio, _now()),
+            (eval_run_id, case_id, n_epochs, n_llm, n_fallback, n_no_report,
+             mean, std, stderr, min_score, max_score, fallback_mean,
+             mean_grounded_ratio, _now()),
         )
 
     def set_human_score(

@@ -50,8 +50,8 @@ class _Judge:
                 "scores": {
                     "coverage": 1,
                     "accuracy": 1,
-                    "citation_quality": 1,
-                    "unsupported_claims": 1,
+                    "citation_support": 1,
+                    "hallucination_avoidance": 1,
                     "conflict_handling": 1,
                 },
                 "rationale": {},
@@ -149,3 +149,113 @@ def test_default_swarm_runner_forwards_browser_backend(monkeypatch, tmp_path):
 
     assert captured["browser_backend"] == "visible"
     assert captured["browser_cdp_url"] == "http://127.0.0.1:9222"
+
+
+def test_recompute_case_agg_excludes_fallback_from_main_mean(tmp_path):
+    """Fallback / no_report epochs must NOT pollute the LLM-judged mean.
+
+    Seeds three epochs for one case:
+      - epoch 0: LLM-judged, score 0.9
+      - epoch 1: fallback (judge returned unparseable output), score 0.0
+      - epoch 2: no_report (swarm delivered nothing), score 0.0
+
+    The headline mean must be 0.9 (only the LLM epoch), not 0.3 (the average
+    of all three). The fallback mean is reported separately, and the n_*
+    counters break the total down by judge_method.
+    """
+    from insightswarm.eval.runner import _recompute_case_agg
+
+    eval_store = EvalStore(tmp_path / "eval.db")
+    eval_run_id = eval_store.create_eval_run(
+        suite="golden",
+        judge_provider="rival",
+        judge_model="rival-x",
+        target_provider="openai",
+        repeat_n=3,
+    )
+    for idx, (method, score) in enumerate([
+        ("llm", 0.9),
+        ("fallback", 0.0),
+        ("no_report", 0.0),
+    ]):
+        eval_store.record_epoch(
+            eval_run_id=eval_run_id,
+            case_id="c",
+            epoch_idx=idx,
+            swarm_run_id=f"run-{idx}",
+            result_type="report",
+            score_overall=score,
+            score_dims={"coverage": score},
+            citation_summary={},
+            grounded_ratio=0.0,
+            latency_ms=0,
+            token_total=0,
+            status="ok",
+            error=None,
+            judge_rationale="",
+            judge_method=method,
+        )
+
+    _recompute_case_agg(eval_store, eval_run_id, "c")
+    agg = eval_store.list_case_aggs(eval_run_id)[0]
+
+    assert agg["n_epochs"] == 3
+    assert agg["n_llm"] == 1
+    assert agg["n_fallback"] == 1
+    assert agg["n_no_report"] == 1
+    assert abs(float(agg["mean"]) - 0.9) < 1e-9
+    assert agg["fallback_mean"] == 0.0
+
+
+def test_judge_method_persisted_on_epoch(tmp_path):
+    """judge_method flows from judge_report through the runner into eval_epochs."""
+    from insightswarm.eval.runner import run_eval
+
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    (cases_dir / "a.json").write_text(
+        json.dumps({"case_id": "a", "question": "A?", "suite": "golden"}),
+        encoding="utf-8",
+    )
+    eval_store = EvalStore(tmp_path / "eval.db")
+
+    class _FailingJudge:
+        provider = "rival"
+        model = "rival-x"
+
+        def complete(self, *args, **kwargs):
+            # Unparseable output -> runner records judge_method="fallback"
+            return ModelResult(
+                text="not json",
+                json_data=None,
+                provider=self.provider,
+                model=self.model,
+                usage={},
+                latency_ms=0,
+                raw_response={},
+                status="ok",
+            )
+
+    def _runner(case):
+        return _Delivery("run-1")
+
+    run_eval(
+        store=_Store(),
+        eval_store=eval_store,
+        cases_dir=cases_dir,
+        swarm_runner=_runner,
+        judge_client=_FailingJudge(),
+        target_provider="openai",
+        repeat=1,
+        suite="golden",
+    )
+
+    epochs = eval_store.conn.execute(
+        "SELECT judge_method, status FROM eval_epochs"
+    ).fetchall()
+    assert len(epochs) == 1
+    # judge_method is the load-bearing field: it records that this epoch's
+    # score came from the deterministic fallback, not the LLM judge. The
+    # epoch-level ``status`` reflects the swarm delivery's final_state
+    # ("completed"), which is independent of how the score was produced.
+    assert epochs[0]["judge_method"] == "fallback"

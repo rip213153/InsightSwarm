@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from insightswarm.cli import build_parser, main
+import pytest
+
+from insightswarm.cli import _build_eval_judge_client, build_parser, main
+from insightswarm.config import Settings
 from insightswarm.eval.store import EvalStore
 
 
@@ -115,3 +119,141 @@ def test_eval_review_records_human_score(tmp_path):
     assert rows[0]["human_score"] == 0.7
     assert rows[0]["human_label"] == "judge_too_lenient"
     assert rows[0]["human_comment"] == "Too generous."
+
+
+def _settings(*, model_provider: str, model_config_path: str | None = None) -> Settings:
+    return Settings(
+        db_path=Path("n/a"),
+        artifact_dir=Path("n/a"),
+        model_provider=model_provider,
+        config_path=None,
+        model_config_path=Path(model_config_path) if model_config_path else None,
+    )
+
+
+def test_build_eval_judge_client_errors_when_judge_provider_equals_target():
+    """Self-enhancement bias guard: --judge-provider must NOT equal the SUT.
+
+    A model grading its own output inflates scores. This must be a hard error,
+    not a warning, so evals cannot silently run with a self-preference bias.
+    """
+    parser = build_parser()
+    args = parser.parse_args([
+        "eval", "run", "--judge-provider", "openai",
+    ])
+    settings = _settings(model_provider="openai")
+    with pytest.raises(SystemExit) as exc:
+        _build_eval_judge_client(args, settings)
+    assert "must differ" in str(exc.value)
+
+
+def test_build_eval_judge_client_errors_when_single_provider_and_no_judge_provider():
+    """With only one provider configured and no --judge-provider, refuse to
+    fall back to the SUT provider. The operator must explicitly nominate a
+    different judge provider."""
+    parser = build_parser()
+    args = parser.parse_args(["eval", "run"])
+    settings = _settings(model_provider="openai")  # no model_config_path
+    with pytest.raises(SystemExit) as exc:
+        _build_eval_judge_client(args, settings)
+    assert "must differ" in str(exc.value)
+
+
+def test_build_eval_judge_client_errors_when_config_has_no_judge_agent(tmp_path):
+    """If config.models.json has no explicit 'judge' agent, refuse to silently
+    reuse the 'default' agent (which is the SUT)."""
+    config_path = tmp_path / "config.models.json"
+    config_path.write_text(
+        json.dumps({
+            "providers": {
+                "default": {
+                    "type": "openai_compatible",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key_env": "MODEL_API_KEY",
+                    "models": {"text": "text-model"},
+                },
+            },
+            "agents": {
+                "default": {"provider": "default"},
+            },
+        }),
+        encoding="utf-8",
+    )
+    parser = build_parser()
+    args = parser.parse_args(["eval", "run"])
+    settings = _settings(
+        model_provider="default",
+        model_config_path=str(config_path),
+    )
+    with pytest.raises(SystemExit) as exc:
+        _build_eval_judge_client(args, settings)
+    assert "must differ" in str(exc.value) or "does not declare a 'judge' agent" in str(exc.value)
+
+
+def test_build_eval_judge_client_errors_when_judge_agent_uses_target_provider(tmp_path):
+    """If the 'judge' agent in config is wired to the same provider as the SUT,
+    refuse rather than silently self-judge."""
+    config_path = tmp_path / "config.models.json"
+    config_path.write_text(
+        json.dumps({
+            "providers": {
+                "default": {
+                    "type": "openai_compatible",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key_env": "MODEL_API_KEY",
+                    "models": {"text": "text-model"},
+                },
+            },
+            "agents": {
+                "default": {"provider": "default"},
+                "judge": {"provider": "default"},  # same as SUT
+            },
+        }),
+        encoding="utf-8",
+    )
+    parser = build_parser()
+    args = parser.parse_args(["eval", "run"])
+    settings = _settings(
+        model_provider="default",
+        model_config_path=str(config_path),
+    )
+    with pytest.raises(SystemExit) as exc:
+        _build_eval_judge_client(args, settings)
+    assert "must differ" in str(exc.value)
+
+
+def test_build_eval_judge_client_accepts_distinct_judge_agent(tmp_path):
+    """Happy path: 'judge' agent in config uses a different provider than the
+    SUT, so the judge is built without error."""
+    config_path = tmp_path / "config.models.json"
+    config_path.write_text(
+        json.dumps({
+            "providers": {
+                "default": {
+                    "type": "openai_compatible",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key_env": "MODEL_API_KEY",
+                    "models": {"text": "text-model"},
+                },
+                "rival": {
+                    "type": "openai_compatible",
+                    "base_url": "https://api.rival.com/v1",
+                    "api_key_env": "RIVAL_API_KEY",
+                    "models": {"text": "rival-model"},
+                },
+            },
+            "agents": {
+                "default": {"provider": "default"},
+                "judge": {"provider": "rival"},
+            },
+        }),
+        encoding="utf-8",
+    )
+    parser = build_parser()
+    args = parser.parse_args(["eval", "run"])
+    settings = _settings(
+        model_provider="default",
+        model_config_path=str(config_path),
+    )
+    client = _build_eval_judge_client(args, settings)
+    assert getattr(client, "provider") == "rival"
