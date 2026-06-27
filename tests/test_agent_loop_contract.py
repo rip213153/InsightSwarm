@@ -16,12 +16,13 @@ TOOLS = [
 ]
 
 
-def test_validate_tool_call_rejects_invalid_enum_value() -> None:
-    """Contract layer enforces enum constraints declared in input_schema.
+def test_validate_tool_call_only_checks_structure_not_shape() -> None:
+    """Contract layer now only checks name + input object structure.
 
-    This is the shape-layer gate: missing/invalid reason values are rejected
-    here, before the handler runs. Handlers only do stateful checks (e.g.
-    quick_read history). Keeps the two layers cleanly separated.
+    Required-key and enum/shape validation has moved to ToolExecutor (single
+    source: the pydantic input model). This test confirms the contract layer
+    no longer rejects missing-required or invalid-enum — those are ToolExecutor's
+    job now. See test_tool_executor_validates_input_shape for the shape checks.
     """
     specs = [
         {
@@ -42,17 +43,19 @@ def test_validate_tool_call_rejects_invalid_enum_value() -> None:
             "side_effects": "none",
         }
     ]
-    # Missing reason → missing_required_input.
+    # Missing reason → contract layer passes (structure OK); ToolExecutor catches it.
     v = validate_tool_call({"name": "fetch_source", "input": {"url": "https://x.com"}}, specs)
-    assert v is not None
-    assert v.failure_kind == "missing_required_input"
-    # Invalid reason → invalid_enum_value.
+    assert v is None
+    # Invalid reason → contract layer passes (structure OK); ToolExecutor catches it.
     v = validate_tool_call({"name": "fetch_source", "input": {"url": "https://x.com", "reason": "because"}}, specs)
-    assert v is not None
-    assert v.failure_kind == "invalid_enum_value"
+    assert v is None
     # Valid reason → no violation.
     v = validate_tool_call({"name": "fetch_source", "input": {"url": "https://x.com", "reason": "verbatim_quote"}}, specs)
     assert v is None
+    # But invalid structure (input not a dict) is still caught here.
+    v = validate_tool_call({"name": "fetch_source", "input": "not-a-dict"}, specs)
+    assert v is not None
+    assert v.failure_kind == "invalid_tool_input"
 
 
 def test_enforce_fast_path_commitment_rejects_blocked_after_fast_path_ready() -> None:

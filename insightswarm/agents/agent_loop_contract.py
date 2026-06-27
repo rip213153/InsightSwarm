@@ -40,13 +40,17 @@ def validate_tool_call(
     tool_call: dict[str, Any] | None,
     tool_specs: list[dict[str, Any]],
 ) -> ContractViolation | None:
-    """Hard gate: structural validation of name + required inputs.
+    """Hard gate: structural validation of name + input object only.
 
     Returns a violation if:
     - tool_call is None or not a dict
     - name is missing or not in tool_specs
     - input is not a dict
-    - required inputs are missing/empty
+
+    Required-key and enum/shape validation has moved to ToolExecutor (single
+    source: the pydantic input model built from input_schema). This layer now
+    only enforces cross-round state guards (repeated_call, required_next_step,
+    fast_path) and the bare structural shape that lets those guards run.
     """
     if not isinstance(tool_call, dict):
         return ContractViolation(
@@ -69,37 +73,6 @@ def validate_tool_call(
             reason="tool_call.input must be a JSON object",
             failure_kind="invalid_tool_input",
         )
-    schema = dict(spec_by_name[name].get("input_schema") or {})
-    required = list(schema.get("required") or [])
-    missing = [key for key in required if key not in tool_input or tool_input.get(key) in (None, "")]
-    if missing:
-        return ContractViolation(
-            kind="invalid_tool_call",
-            reason=f"missing required input for {name}: {', '.join(missing)}",
-            failure_kind="missing_required_input",
-        )
-    # Enum constraints declared in the input_schema are runtime-enforced here,
-    # so handlers don't have to re-validate. This keeps "shape" checks in the
-    # contract layer and "stateful" checks (e.g. quick_read history) in handlers.
-    properties = dict(schema.get("properties") or {})
-    for field_name, field_spec in properties.items():
-        enum_values = list(field_spec.get("enum") or [])
-        if not enum_values:
-            continue
-        value = tool_input.get(field_name)
-        if value is None:
-            continue  # missing required already checked above
-        value_str = str(value).strip()
-        allowed_str = [str(v) for v in enum_values]
-        if value_str not in allowed_str:
-            return ContractViolation(
-                kind="invalid_tool_call",
-                reason=(
-                    f"invalid value for {name}.{field_name}: {value_str!r}; "
-                    f"must be one of {allowed_str}"
-                ),
-                failure_kind="invalid_enum_value",
-            )
     return None
 
 
