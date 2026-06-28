@@ -106,6 +106,50 @@ DEFAULT_STALL_POLICY = StallPolicy(
 )
 
 
+def _emit_contract_rejection(
+    loop_state: AgentLoopState,
+    round_number: int,
+    tool_call: dict[str, Any],
+    turn: dict[str, Any],
+    tool_result: dict[str, Any],
+    failure_kind: str,
+    terminal_reason: str,
+    on_tool_result: Callable | None,
+    trace: list[dict[str, Any]],
+) -> bool:
+    """Emit a contract rejection (violation or invalid_input) and check limit.
+
+    Shared by the contract-violation block and the invalid_input block: appends
+    the assistant/tool messages, event, on_tool_result callback, and trace
+    entry, then checks the contract violation limit. Returns True if the loop
+    should break (limit reached, terminal state set), False to continue.
+    """
+    loop_state.messages.append({"role": "assistant", "content": _compact_json(turn, limit=3000)})
+    loop_state.messages.append({"role": "tool", "content": _compact_json(tool_result, limit=2000)})
+    _append_event(loop_state, round_number, tool_call, tool_result)
+    if on_tool_result:
+        on_tool_result(round_number, tool_call, tool_result, loop_state)
+    trace.append(
+        {
+            "round": round_number,
+            "assistant_text": turn.get("assistant_text"),
+            "tool_call": tool_call,
+            "executed_tool": None,
+            "tool_result": tool_result,
+            "stop_reason": None,
+            "failure_kind": failure_kind,
+            "private_state": dict(loop_state.private_state),
+            "minimal_event_memory": dict(loop_state.event_memory),
+        }
+    )
+    if loop_state.consecutive_contract_violations < CONTRACT_VIOLATION_LIMIT:
+        return False
+    loop_state.terminal_status = "blocked"
+    loop_state.terminal_reason = terminal_reason
+    loop_state.stop_reason = "contract_violation_limit"
+    return True
+
+
 def run_agent_loop(
     *,
     model_client: object | None,
@@ -216,33 +260,20 @@ def run_agent_loop(
             loop_state.consecutive_contract_violations += 1
             tool_result = _build_violation_result(violation, loop_state)
             loop_state.tool_contract_recovery = _violation_recovery(violation, tool_specs)
-            loop_state.messages.append({"role": "assistant", "content": _compact_json(turn, limit=3000)})
-            loop_state.messages.append({"role": "tool", "content": _compact_json(tool_result, limit=2000)})
-            _append_event(loop_state, round_number, tool_call, tool_result)
-            if on_tool_result:
-                on_tool_result(round_number, tool_call, tool_result, loop_state)
-            trace.append(
-                {
-                    "round": round_number,
-                    "assistant_text": turn.get("assistant_text"),
-                    "tool_call": tool_call,
-                    "executed_tool": None,
-                    "tool_result": tool_result,
-                    "stop_reason": None,
-                    "failure_kind": violation.failure_kind,
-                    "private_state": dict(loop_state.private_state),
-                    "minimal_event_memory": dict(loop_state.event_memory),
-                }
-            )
-            if loop_state.consecutive_contract_violations < CONTRACT_VIOLATION_LIMIT:
-                continue
-            loop_state.terminal_status = "blocked"
-            loop_state.terminal_reason = (
+            if _emit_contract_rejection(
+                loop_state,
+                round_number,
+                tool_call,
+                turn,
+                tool_result,
+                violation.failure_kind,
                 f"contract violation limit reached: {loop_state.consecutive_contract_violations} consecutive "
-                f"rejections ({violation.failure_kind}). The model could not produce a compliant tool call."
-            )
-            loop_state.stop_reason = "contract_violation_limit"
-            break
+                f"rejections ({violation.failure_kind}). The model could not produce a compliant tool call.",
+                on_tool_result,
+                trace,
+            ):
+                break
+            continue
 
         # --- Execute the validated, non-repeated, compliant tool call ---
         execution = executor.execute(tool_call)
@@ -265,33 +296,20 @@ def run_agent_loop(
                 "reason": execution.error,
                 "required_next_step": tool_result["required_next_step"],
             }
-            loop_state.messages.append({"role": "assistant", "content": _compact_json(turn, limit=3000)})
-            loop_state.messages.append({"role": "tool", "content": _compact_json(tool_result, limit=2000)})
-            _append_event(loop_state, round_number, tool_call, tool_result)
-            if on_tool_result:
-                on_tool_result(round_number, tool_call, tool_result, loop_state)
-            trace.append(
-                {
-                    "round": round_number,
-                    "assistant_text": turn.get("assistant_text"),
-                    "tool_call": tool_call,
-                    "executed_tool": None,
-                    "tool_result": tool_result,
-                    "stop_reason": None,
-                    "failure_kind": "invalid_input",
-                    "private_state": dict(loop_state.private_state),
-                    "minimal_event_memory": dict(loop_state.event_memory),
-                }
-            )
-            if loop_state.consecutive_contract_violations < CONTRACT_VIOLATION_LIMIT:
-                continue
-            loop_state.terminal_status = "blocked"
-            loop_state.terminal_reason = (
+            if _emit_contract_rejection(
+                loop_state,
+                round_number,
+                tool_call,
+                turn,
+                tool_result,
+                "invalid_input",
                 f"contract violation limit reached: {loop_state.consecutive_contract_violations} consecutive "
-                f"rejections (invalid_input). The model could not produce valid tool inputs."
-            )
-            loop_state.stop_reason = "contract_violation_limit"
-            break
+                f"rejections (invalid_input). The model could not produce valid tool inputs.",
+                on_tool_result,
+                trace,
+            ):
+                break
+            continue
 
         loop_state.step_count += 1
         loop_state.model_failure_count = 0
