@@ -23,8 +23,6 @@ class TaskStore:
     def create(
         self,
         run_id: str,
-        *,
-        event_bus: EventBus | None = None,
         **task_kwargs: Any,
     ) -> Task:
         with self.store.transaction() as conn:
@@ -70,7 +68,7 @@ class TaskStore:
             )
         # Transaction has committed above (the `with` block exited). Notify only
         # after the commit so a woken worker can actually see the new row.
-        bus = event_bus or self._event_bus
+        bus = self._event_bus
         if bus is not None:
             target_role = str(task_kwargs.get("owner_role") or "")
             if target_role:
@@ -299,7 +297,6 @@ class Mailbox:
         message_type: str,
         payload: dict[str, Any] | None = None,
         related_task_id: str | None = None,
-        event_bus: EventBus | None = None,
     ) -> Message:
         validate_message(
             message_type=message_type,
@@ -317,7 +314,7 @@ class Mailbox:
         )
         # create_swarm_message commits its own transaction before returning, so
         # the row is durable before we wake any recipient worker.
-        bus = event_bus or self._event_bus
+        bus = self._event_bus
         if bus is not None:
             if broadcast:
                 # Broadcasts reach every role's inbox; wake them all so each

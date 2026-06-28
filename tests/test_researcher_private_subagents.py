@@ -169,7 +169,7 @@ def test_researcher_dedupes_repeated_normalized_url_fetch_and_publish(tmp_path: 
     assert len(fetch_calls) == 1
 
 
-def test_researcher_subagents_cap_at_three(tmp_path: Path, monkeypatch) -> None:
+def test_researcher_subagents_cap_at_four(tmp_path: Path, monkeypatch) -> None:
     store = _build_store(tmp_path)
     task_store = TaskStore(store)
     mailbox = Mailbox(store)
@@ -227,8 +227,8 @@ def test_researcher_subagents_cap_at_three(tmp_path: Path, monkeypatch) -> None:
     )
 
     assert result["ok"] is True
-    assert len(result["findings"]) == 3
-    assert [item["question"] for item in result["findings"]] == ["产品路线", "企业商业化", "基础设施"]
+    assert len(result["findings"]) == 4
+    assert [item["question"] for item in result["findings"]] == ["产品路线", "企业商业化", "基础设施", "安全治理"]
 
 
 def test_researcher_subagent_uses_independent_model_loop(tmp_path: Path, monkeypatch) -> None:

@@ -702,12 +702,12 @@ class ResearcherToolHandlers:
             return {"ok": False, "error": "read_task first"}
         raw_subtasks = list(tool_input.get("subtasks") or [])
         subtasks = [_normalize_subagent_task(item, index=index) for index, item in enumerate(raw_subtasks) if isinstance(item, dict)]
-        subtasks = [item for item in subtasks if item["question"]][:3]
+        subtasks = [item for item in subtasks if item["question"]][:4]
         if not subtasks:
             return {"ok": False, "error": "spawn_research_subagents requires 1-3 subtasks with question"}
 
         findings: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=min(3, len(subtasks))) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [
                 executor.submit(
                     _run_research_subagent,

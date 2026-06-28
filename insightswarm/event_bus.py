@@ -65,9 +65,8 @@ class EventBus:
         fallback.
         """
         with self._lock:
-            roles = list(self._conditions.keys())
-        for role in roles:
-            self.notify_role(role)
+            for cond in self._conditions.values():
+                cond.notify_all()
 
     def wait(self, role: str, timeout: float) -> bool:
         """Block up to ``timeout`` seconds for a notify on ``role``.
