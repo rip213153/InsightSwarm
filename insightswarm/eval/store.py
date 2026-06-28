@@ -25,6 +25,34 @@ def init_eval_db(db_path: str | Path) -> None:
     schema_path = Path(__file__).with_name("schema_eval.sql")
     conn = get_db_connection(db_path)
     conn.executescript(schema_path.read_text(encoding="utf-8"))
+    _migrate_eval_schema(conn)
+
+
+def _migrate_eval_schema(conn) -> None:
+    """Idempotent column adds for legacy eval.db (pre judge_method / n_llm era).
+
+    CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so new columns
+    declared in schema_eval.sql never get added to old databases. This migrator
+    introspects PRAGMA table_info and ALTERs missing columns with DEFAULTs
+    matching the schema, so old eval.db files upgrade transparently.
+    """
+    # eval_epochs: judge_method
+    epoch_cols = {row["name"] for row in conn.execute("PRAGMA table_info(eval_epochs)")}
+    if "judge_method" not in epoch_cols:
+        conn.execute(
+            "ALTER TABLE eval_epochs ADD COLUMN judge_method TEXT NOT NULL DEFAULT 'llm'"
+        )
+    # eval_case_agg: n_llm / n_fallback / n_no_report / fallback_mean
+    agg_cols = {row["name"] for row in conn.execute("PRAGMA table_info(eval_case_agg)")}
+    for col, ddl in (
+        ("n_llm",         "ALTER TABLE eval_case_agg ADD COLUMN n_llm INTEGER NOT NULL DEFAULT 0"),
+        ("n_fallback",    "ALTER TABLE eval_case_agg ADD COLUMN n_fallback INTEGER NOT NULL DEFAULT 0"),
+        ("n_no_report",   "ALTER TABLE eval_case_agg ADD COLUMN n_no_report INTEGER NOT NULL DEFAULT 0"),
+        ("fallback_mean", "ALTER TABLE eval_case_agg ADD COLUMN fallback_mean REAL"),
+    ):
+        if col not in agg_cols:
+            conn.execute(ddl)
+    conn.commit()
 
 
 class EvalStore:
