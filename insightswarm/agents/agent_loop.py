@@ -153,10 +153,21 @@ def run_agent_loop(
             max_tokens=max_tokens,
         )
         tool_call = _parse_tool_call(turn, tool_specs)
-        loop_state.private_state = _next_private_state(turn, loop_state.private_state)
+        # Compute the effective stop_reason before _next_private_state: when the
+        # model omits stop_reason but also omits tool_call, backfill
+        # "model_no_tool" so the preserve-on-failure set matches. Only backfill
+        # when tool_call is None — a valid tool_call path relies on the model's
+        # own private_state (L770-771), not stop_reason preservation.
+        if tool_call is None and not _safe_text(turn.get("stop_reason")):
+            effective_stop_reason = "model_no_tool"
+        else:
+            effective_stop_reason = _safe_text(turn.get("stop_reason"))
+        loop_state.private_state = _next_private_state(
+            turn, loop_state.private_state, effective_stop_reason
+        )
 
         if tool_call is None:
-            failure_status = _safe_text(turn.get("stop_reason")) or "model_no_tool"
+            failure_status = effective_stop_reason or "model_no_tool"
             failure_reason = _safe_text(turn.get("assistant_text")) or "model stopped without a tool call"
             loop_state.model_failure_count += 1
             tool_result = {
@@ -765,7 +776,11 @@ def _parse_tool_call(turn: dict[str, Any], tool_specs: list[dict[str, Any]]) -> 
     return {"name": name, "input": dict(tool_input or {}) if isinstance(tool_input, dict) else {}}
 
 
-def _next_private_state(turn: dict[str, Any], previous_state: dict[str, Any] | None = None) -> dict[str, Any]:
+def _next_private_state(
+    turn: dict[str, Any],
+    previous_state: dict[str, Any] | None = None,
+    effective_stop_reason: str | None = None,
+) -> dict[str, Any]:
     private_state = turn.get("private_state")
     if isinstance(private_state, dict):
         return _compact_json(private_state, limit=3500)
@@ -775,7 +790,12 @@ def _next_private_state(turn: dict[str, Any], previous_state: dict[str, Any] | N
     # model via the model_error tool_result (history layer), not private_state
     # (reasoning layer). Mirrors V3's separation: tool results live in history,
     # reasoning lives in prefix/memory — they don't bleed into each other.
-    if _safe_text(turn.get("stop_reason")) in {"model_error", "model_rate_limited", "model_no_tool", "invalid_json"} and previous_state:
+    #
+    # Decoupled from turn["stop_reason"]: when the model omits stop_reason (the
+    # most common no-tool violation), _call_model passes through raw JSON
+    # without backfill, so the caller computes effective_stop_reason (e.g.
+    # backfills "model_no_tool" when tool_call is None) and passes it here.
+    if _safe_text(effective_stop_reason) in {"model_error", "model_rate_limited", "model_no_tool", "invalid_json"} and previous_state:
         return dict(previous_state)
     return {
         "current_understanding": _safe_text(turn.get("current_understanding")) or _safe_text(turn.get("assistant_text")),

@@ -109,10 +109,27 @@ def test_next_private_state_preserves_prior_state_on_model_error() -> None:
         "tool_call": None,
         "stop_reason": "model_error",
     }
-    new_state = _next_private_state(error_turn, prior)
+    new_state = _next_private_state(error_turn, prior, effective_stop_reason="model_error")
     # Prior understanding preserved — error text did NOT leak into reasoning.
     assert new_state["current_understanding"] == prior["current_understanding"]
     assert "timed out" not in new_state["current_understanding"]
+
+
+def test_next_private_state_preserves_prior_state_when_model_omits_stop_reason() -> None:
+    """模型最常见违规：省略 stop_reason、省略 tool_call、省略 private_state。
+
+    phase-0-hotfix 必须保留 previous_state，否则下一轮模型失忆陷入死循环。
+    主循环在 tool_call is None 且 stop_reason 为空时回填 "model_no_tool"
+    作为 effective_stop_reason 传入，_next_private_state 据此命中保留集合。
+    """
+    from insightswarm.agents.agent_loop import _next_private_state
+
+    prior = {"current_understanding": "需要 finish", "plan": "下一轮 finish"}
+    omitted_turn = {"assistant_text": "I am done but forgot the tool."}
+    # 调用方按 fix 方案算出 effective_stop_reason
+    new_state = _next_private_state(omitted_turn, prior, effective_stop_reason="model_no_tool")
+    assert new_state["current_understanding"] == prior["current_understanding"]
+    assert new_state["plan"] == prior["plan"]
 
 
 def test_next_private_state_falls_back_to_assistant_text_on_normal_turn() -> None:
@@ -143,6 +160,29 @@ class _NoToolThenFinishModel:
         if self.calls == 1:
             return _ModelResult({"assistant_text": "I am done but forgot the tool."})
         return _ModelResult({"tool_call": {"name": "finish_research", "input": {"status": "complete", "reason": "explicit finish"}}})
+
+
+class _OmitStopReasonPreserveStateThenFinishModel:
+    """Reproduces the most common no-tool violation shape: model omits stop_reason.
+
+    Round 1: model provides private_state={"foo": "bar"} but omits tool_call and
+             stop_reason — private_state is committed via the model's own output.
+    Round 2: model omits private_state too (full amnesia shape) — the fix must
+             preserve round 1's private_state via the effective_stop_reason
+             backfill (tool_call is None + stop_reason empty -> "model_no_tool").
+    Round 3: explicit finish_research.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return _ModelResult({"assistant_text": "thinking", "private_state": {"foo": "bar"}})
+        if self.calls == 2:
+            return _ModelResult({"assistant_text": "still thinking"})
+        return _ModelResult({"tool_call": {"name": "finish_research", "input": {"status": "complete", "reason": "done"}}})
 
 
 class _AlwaysNoToolModel:
@@ -202,6 +242,38 @@ def test_agent_loop_requires_explicit_finish_tool_after_no_tool_turn() -> None:
     assert state.terminal_status == "done"
     assert trace[0]["failure_kind"] == "model_no_tool"
     assert trace[1]["tool_call"]["name"] == "finish_research"
+
+
+def test_agent_loop_preserves_private_state_when_model_omits_stop_reason() -> None:
+    """E2E regression: when model omits stop_reason + tool_call + private_state,
+    prior private_state must be preserved (not reset to defaults).
+
+    Without the fix, round 2 resets private_state to defaults (foo=bar lost),
+    causing the amnesia loop the hotfix meant to prevent. The fix backfills
+    "model_no_tool" as effective_stop_reason when tool_call is None and
+    stop_reason is empty, so _next_private_state hits the preserve-set.
+    """
+    trace, state = run_agent_loop(
+        model_client=_OmitStopReasonPreserveStateThenFinishModel(),
+        system_prompt="Use tools.",
+        tool_specs=TOOLS,
+        executor=ToolExecutor(TOOLS, {"finish_research": lambda _: {"ok": True, "terminal": True, "status": "done", "reason": "done"}}),
+        initial_user_payload={"task": "demo"},
+        safety_cap=5,
+    )
+
+    # Round 1: model provided private_state explicitly — committed.
+    assert trace[0]["failure_kind"] == "model_no_tool"
+    assert trace[0]["private_state"].get("foo") == "bar"
+    # Round 2: model omitted private_state entirely — fix must preserve
+    # round 1's private_state instead of resetting to the default dict.
+    assert trace[1]["failure_kind"] == "model_no_tool"
+    assert trace[1]["private_state"].get("foo") == "bar", (
+        "private_state was reset when model omitted stop_reason — amnesia regression"
+    )
+    # Round 3: explicit finish.
+    assert trace[2]["tool_call"]["name"] == "finish_research"
+    assert state.terminal_status == "done"
 
 
 def test_agent_loop_does_not_treat_repeated_no_tool_as_done() -> None:
