@@ -11,6 +11,11 @@ from insightswarm.tools.core import ToolContext, ToolResult
 from insightswarm.tools.fetch import LADDER_L1_QUICK_READ, LADDER_L2_FETCH, _try_jina_reader
 from insightswarm.tools.safety import validate_public_http_url
 
+# Diagnostic ladder value reported when Firecrawl L2 was never attempted
+# because no API key was configured. Distinct from LADDER_L2_FETCH, which
+# indicates L2 was actually tried and failed before falling back to Jina.
+LADDER_L2_SKIPPED_NO_KEY = "L2_skipped_no_key"
+
 
 class FirecrawlScrapeTool:
     name = "firecrawl.scrape"
@@ -28,7 +33,9 @@ class FirecrawlScrapeTool:
             # the "auto from L1" fallback: L2 is unavailable, so we serve an
             # L1 result rather than failing. Caller can inspect `fetcher` /
             # `ladder` to know which path produced the text.
-            return _jina_fallback_result(url, started, reason="missing Firecrawl API key")
+            return _jina_fallback_result(
+                url, started, reason="missing Firecrawl API key", missing_key=True
+            )
 
         payload = {
             "url": url,
@@ -122,11 +129,20 @@ class FirecrawlScrapeTool:
         )
 
 
-def _jina_fallback_result(url: str, started: float, *, reason: str) -> ToolResult:
-    """Run Jina Reader and wrap the result as an L1 fallback for Firecrawl."""
+def _jina_fallback_result(
+    url: str, started: float, *, reason: str, missing_key: bool = False
+) -> ToolResult:
+    """Run Jina Reader and wrap the result as an L1 fallback for Firecrawl.
+
+    ``missing_key=True`` indicates Firecrawl L2 was never attempted because no
+    API key was configured; the result's ``escalated_from`` is then reported as
+    ``LADDER_L2_SKIPPED_NO_KEY`` so it can be distinguished from a genuine
+    L2-attempted-then-failed fallback (which reports ``LADDER_L2_FETCH``).
+    """
     jina = _try_jina_reader(url)
     if jina is not None:
-        return _build_jina_fallback_result(url, jina, started, ladder=LADDER_L2_FETCH, reason=reason)
+        ladder = LADDER_L2_SKIPPED_NO_KEY if missing_key else LADDER_L2_FETCH
+        return _build_jina_fallback_result(url, jina, started, ladder=ladder, reason=reason)
     return ToolResult(
         "error",
         error=f"Firecrawl unavailable and Jina fallback failed: {reason}",
