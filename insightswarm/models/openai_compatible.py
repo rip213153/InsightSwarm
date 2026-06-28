@@ -9,10 +9,10 @@ from typing import Any
 
 import orjson
 from tenacity import (
+    RetryCallState,
     Retrying,
     retry_if_exception,
     stop_after_attempt,
-    wait_exponential,
 )
 
 from insightswarm.models.clients import ModelResult
@@ -50,6 +50,20 @@ def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, HttpResponseError):
         return exc.status_code == 429 or 500 <= exc.status_code < 600
     return False
+
+
+def _retry_wait(retry_state: RetryCallState) -> float:
+    """Honor Retry-After (cap 20s); otherwise exponential backoff capped at 8s."""
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    if isinstance(exc, HttpResponseError) and exc.headers:
+        retry_after = exc.headers.get("Retry-After") or exc.headers.get("retry-after")
+        if retry_after:
+            try:
+                return min(float(retry_after), 20.0)
+            except ValueError:
+                pass
+    attempt = retry_state.attempt_number - 1
+    return min(2.0 ** attempt, 8.0)
 
 
 class OpenAICompatibleClient:
@@ -138,11 +152,12 @@ class OpenAICompatibleClient:
             payload["temperature"] = temperature
         started = time.perf_counter()
         # Hand-written retry loop (formerly ~80 lines) replaced by tenacity:
-        # 3 retries with exponential backoff (1s, 2s, 4s) on network errors and
-        # HTTP 429/5xx. See git history for the original inline implementation.
+        # 3 retries with exponential backoff (1s, 2s, 4s, cap 8s) on network
+        # errors and HTTP 429/5xx, honoring Retry-After (cap 20s). See git
+        # history for the original inline implementation.
         retrying = Retrying(
             stop=stop_after_attempt(4),
-            wait=wait_exponential(multiplier=1, max=4),
+            wait=_retry_wait,
             retry=retry_if_exception(_is_retryable),
             reraise=True,
         )

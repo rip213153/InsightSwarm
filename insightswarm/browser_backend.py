@@ -540,10 +540,9 @@ def _wait_for_json_endpoint(port: int, timeout: float) -> None:
     version_url = f"http://127.0.0.1:{port}/json/version"
     while time.time() < deadline:
         try:
-            with urlopen(version_url, timeout=1.0) as response:
-                if response.status == 200:
-                    return
-        except (URLError, OSError, TimeoutError):
+            request_json(version_url, timeout=1.0)
+            return
+        except (HttpRequestError, HttpResponseError):
             time.sleep(0.2)
     raise BrowserBackendUnavailable(
         "browser backend unavailable: visible chrome did not expose the debugging endpoint in time",
@@ -555,14 +554,12 @@ def _discover_page_ws_url(port: int, timeout: float) -> str:
     deadline = time.time() + max(timeout, 1.0)
     while time.time() < deadline:
         try:
-            with urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1.0) as response:
-                if response.status != 200:
-                    continue
-                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            payload = request_json(f"http://127.0.0.1:{port}/json/list", timeout=1.0)
+            if isinstance(payload, list):
                 for target in payload:
                     if isinstance(target, dict) and target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
                         return str(target["webSocketDebuggerUrl"])
-        except (URLError, OSError, TimeoutError, json.JSONDecodeError):
+        except (HttpRequestError, HttpResponseError, ValueError):
             pass
         time.sleep(0.2)
     raise BrowserBackendUnavailable(

@@ -12,10 +12,11 @@ import orjson
 class HttpResponseError(Exception):
     """Raised when an HTTP request returns a non-2xx status code."""
 
-    def __init__(self, status_code: int, body: str):
+    def __init__(self, status_code: int, body: str, headers: dict[str, str] | None = None):
         super().__init__(f"HTTP {status_code}: {body[:500]}")
         self.status_code = status_code
         self.body = body
+        self.headers = headers
 
 
 class HttpRequestError(Exception):
@@ -71,7 +72,7 @@ def request_json(
             return orjson.loads(raw)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise HttpResponseError(exc.code, detail) from exc
+        raise HttpResponseError(exc.code, detail, dict(exc.headers or {})) from exc
     except urllib.error.URLError as exc:
         raise HttpRequestError(f"request failed: {exc.reason}") from exc
     except (TimeoutError, socket.timeout) as exc:
