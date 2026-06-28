@@ -190,14 +190,20 @@ class ModelRegistry:
         if provider is None:
             raise ValueError(f"unknown model provider '{agent.provider}'")
         if provider.type == "fake":
-            return FakeModelClient()
-        model = agent.model or provider.models.get(agent.capability) or provider.models.get("text")
-        if not model:
-            raise ValueError(f"provider '{provider.name}' has no model for capability '{agent.capability}'")
-        return OpenAICompatibleClient(
-            provider=provider.name,
-            model=model,
-            base_url=provider.base_url,
-            api_key_env=provider.api_key_env or "OPENAI_API_KEY",
-            timeout_seconds=provider.timeout_seconds,
-        )
+            client: Any = FakeModelClient()
+        else:
+            model = agent.model or provider.models.get(agent.capability) or provider.models.get("text")
+            if not model:
+                raise ValueError(f"provider '{provider.name}' has no model for capability '{agent.capability}'")
+            client = OpenAICompatibleClient(
+                provider=provider.name,
+                model=model,
+                base_url=provider.base_url,
+                api_key_env=provider.api_key_env or "OPENAI_API_KEY",
+                timeout_seconds=provider.timeout_seconds,
+            )
+        # Attach provider capability flags so downstream consumers (_call_model,
+        # AuditedModelClient) can read them without re-resolving the config.
+        client.supports_tool_choice_required = provider.supports_tool_choice_required
+        client.supports_json_schema_strict = provider.supports_json_schema_strict
+        return client

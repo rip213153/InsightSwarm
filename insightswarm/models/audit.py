@@ -10,6 +10,10 @@ class AuditedModelClient:
         self.store = store
         self.provider = getattr(inner, "provider", getattr(getattr(inner, "text", None), "provider", "unknown"))
         self.model = getattr(inner, "model", getattr(getattr(inner, "text", None), "model", "unknown"))
+        # Forward provider capability flags so callers (e.g. _call_model) can
+        # read them through the audit wrapper without unwrapping the inner client.
+        self.supports_tool_choice_required = bool(getattr(inner, "supports_tool_choice_required", False))
+        self.supports_json_schema_strict = bool(getattr(inner, "supports_json_schema_strict", False))
 
     def complete(
         self,
@@ -18,6 +22,8 @@ class AuditedModelClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         metadata: dict | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> ModelResult:
         metadata = metadata or {}
         result = self.inner.complete(
@@ -26,6 +32,8 @@ class AuditedModelClient:
             max_tokens=max_tokens,
             temperature=temperature,
             metadata=metadata,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         run_id = metadata.get("run_id")
         if run_id:

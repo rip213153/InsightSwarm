@@ -23,7 +23,7 @@ class _StubModelClient:
         self.responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
-    def complete(self, messages, response_format=None, max_tokens=None, temperature=None, metadata=None):
+    def complete(self, messages, response_format=None, max_tokens=None, temperature=None, metadata=None, tools=None, tool_choice=None):
         self.calls.append({"messages": messages, "metadata": metadata or {}, "response_format": response_format})
         return _ModelResult(self.responses.pop(0))
 

@@ -355,6 +355,20 @@ def _call_model(
         "role": metadata_role,
         "operation": str((metadata or {}).get("operation") or metadata_role),
     }
+    tools = _build_openai_tools(tool_specs) if tool_specs else None
+    supports_required = bool(getattr(model_client, "supports_tool_choice_required", False))
+    supports_json_strict = bool(getattr(model_client, "supports_json_schema_strict", False))
+    # tool_choice="required" forces the model to emit a tool_call, eliminating
+    # the model_no_tool escape; only enable for providers that advertise support.
+    # supports_json_schema_strict is recorded into metadata so the audit trail
+    # captures the provider capability; full json_schema strict response_format
+    # gating lands in phase-2 alongside the AgentTurn schema.
+    if tools:
+        tool_choice = "required" if supports_required else "auto"
+    else:
+        tool_choice = None
+    if supports_json_strict:
+        call_metadata["provider_supports_json_schema_strict"] = True
     result = model_client.complete(
         [
             {"role": "system", "content": composed_system_prompt},
@@ -364,6 +378,8 @@ def _call_model(
         temperature=0.2,
         max_tokens=max_tokens,
         metadata=call_metadata,
+        tools=tools,
+        tool_choice=tool_choice,
     )
     if str(getattr(result, "status", "ok")) != "ok":
         error_text = str(getattr(result, "error", "") or "model call failed")
@@ -434,6 +450,37 @@ def _model_tool_specs(tool_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 item[key] = value[:300]
         compact.append(item)
     return compact
+
+
+def _build_openai_tools(tool_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert InsightSwarm tool_specs to OpenAI function-calling format.
+
+    Each internal tool_spec carries ``name``, ``description``, and
+    ``input_schema`` (a JSON-schema object). The OpenAI chat completions API
+    expects ``{"type": "function", "function": {"name", "description",
+    "parameters"}}``. The internal JSON-tool protocol (AgentTurn) is unchanged;
+    these tools are forwarded so providers that support native function-calling
+    can use them as supplementary selection signal.
+    """
+    tools: list[dict[str, Any]] = []
+    for spec in tool_specs:
+        name = str(spec.get("name") or "")
+        if not name:
+            continue
+        parameters = spec.get("input_schema")
+        if not isinstance(parameters, dict):
+            parameters = {"type": "object", "properties": {}}
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(spec.get("description") or ""),
+                    "parameters": parameters,
+                },
+            }
+        )
+    return tools
 
 
 def _compact_input_schema(schema: Any) -> dict[str, Any]:

@@ -26,8 +26,8 @@ class _ExtractorCitationModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    def complete(self, messages, response_format=None, max_tokens=None, temperature=None, metadata=None):
-        del messages, response_format, max_tokens, temperature, metadata
+    def complete(self, messages, response_format=None, max_tokens=None, temperature=None, metadata=None, tools=None, tool_choice=None):
+        del messages, response_format, max_tokens, temperature, metadata, tools, tool_choice
         self.calls += 1
         if self.calls == 1:
             payload = {
